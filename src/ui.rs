@@ -1,6 +1,7 @@
 use crate::{
     audio::{Command, DeviceInfo, Engine, Event, RunningInfo},
-    model::{self, Backend, Preset, SharedParameters},
+    midi,
+    model::{self, Backend, InstrumentSource, Preset, SharedParameters, SynthSound},
     storage::{self, Session},
 };
 use eframe::egui::{self, Color32, RichText};
@@ -20,6 +21,8 @@ pub struct Studio {
     shared: Arc<SharedParameters>,
     engine: Engine,
     devices: Vec<DeviceInfo>,
+    midi_ports: Vec<midi::Port>,
+    midi_note: String,
     device_note: String,
     status: String,
     running: Option<RunningInfo>,
@@ -34,6 +37,7 @@ pub struct Studio {
     save_enabled: bool,
     meters: [f32; 2],
     failed: bool,
+    audition_after_start: bool,
 }
 impl Studio {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -51,7 +55,7 @@ impl Studio {
             style.spacing.slider_width = 330.0;
         });
         let path = storage::session_path();
-        let (session, notice) = path.as_ref().map_or_else(
+        let (mut session, notice) = path.as_ref().map_or_else(
             || {
                 (
                     Session::default(),
@@ -63,6 +67,9 @@ impl Studio {
             },
             |p| storage::load(p),
         );
+        if std::env::args().any(|arg| arg == "--keyboard") {
+            session.audio.source = InstrumentSource::MidiKeyboard;
+        }
         let save_enabled = path.is_some()
             && !notice
                 .as_ref()
@@ -75,8 +82,10 @@ impl Studio {
             shared,
             engine,
             devices: Vec::new(),
+            midi_ports: Vec::new(),
+            midi_note: String::new(),
             device_note: String::new(),
-            status: "Connect your guitar. Make room for a little clarity.".into(),
+            status: "Choose your instrument, then press Start.".into(),
             running: None,
             pending: false,
             settings: std::env::args().any(|arg| arg == "--setup"),
@@ -89,12 +98,41 @@ impl Studio {
             save_enabled,
             meters: [0.0; 2],
             failed: false,
+            audition_after_start: false,
         }
     }
     fn changed(&mut self) {
         self.dirty = true;
         self.last_change = Instant::now();
         self.shared.publish(self.session.parameters);
+        self.engine.midi.set_sound(self.session.audio.synth_sound);
+    }
+    fn prepare_keyboard(&mut self) {
+        if self.session.audio.midi_port.is_empty()
+            && let Some(port) = self
+                .midi_ports
+                .iter()
+                .find(|p| p.name.to_lowercase().contains("mpk"))
+                .or(self.midi_ports.first())
+        {
+            self.session.audio.midi_port = port.id.clone();
+        }
+        if self.session.audio.output_id.is_empty()
+            && let Some(output) = self
+                .devices
+                .iter()
+                .find(|d| {
+                    d.backend == Backend::Wasapi && d.default_output && d.output_channels >= 2
+                })
+                .or_else(|| {
+                    self.devices
+                        .iter()
+                        .find(|d| d.backend == Backend::Wasapi && d.output_channels >= 2)
+                })
+        {
+            self.session.audio.backend = Backend::Wasapi;
+            self.session.audio.output_id = output.id.clone();
+        }
     }
     fn persist(&mut self) {
         if !self.dirty || !self.save_enabled {
@@ -125,7 +163,8 @@ impl Studio {
                 Event::Devices(devices, note) => {
                     self.devices = devices;
                     self.device_note = note;
-                    if self.session.audio.input_id.is_empty()
+                    if self.session.audio.source == InstrumentSource::Guitar
+                        && self.session.audio.input_id.is_empty()
                         && self.session.audio.output_id.is_empty()
                     {
                         // Only suggest a recognized guitar interface; never auto-select a PC microphone.
@@ -153,11 +192,37 @@ impl Studio {
                         }
                     }
                 }
+                Event::MidiDevices(ports, note) => {
+                    self.midi_ports = ports;
+                    self.midi_note = note;
+                    if self.session.audio.source == InstrumentSource::Guitar
+                        && self.session.audio.input_id.is_empty()
+                        && self
+                            .midi_ports
+                            .iter()
+                            .any(|p| p.name.to_lowercase().contains("mpk"))
+                    {
+                        self.session.audio.source = InstrumentSource::MidiKeyboard;
+                    }
+                    if self.session.audio.source.has_midi() {
+                        self.prepare_keyboard();
+                        self.changed();
+                    }
+                }
                 Event::Running(info) => {
+                    if self.audition_after_start {
+                        self.engine.midi.test_sound();
+                        self.audition_after_start = false;
+                    }
                     self.running = Some(info);
                     self.pending = false;
                     self.failed = false;
-                    self.status = "Monitoring · your guitar, with a little more space.".into();
+                    self.status = if self.session.audio.source.has_midi() {
+                        "Ready to play · MIDI notes become sound in Shredini."
+                    } else {
+                        "Monitoring · your guitar, with a little more space."
+                    }
+                    .into();
                 }
                 Event::Stopped => {
                     self.running = None;
@@ -165,6 +230,7 @@ impl Studio {
                     self.status = "Monitoring stopped.".into();
                 }
                 Event::Failed(message) => {
+                    self.audition_after_start = false;
                     self.running = None;
                     self.pending = false;
                     self.failed = true;
@@ -192,9 +258,9 @@ impl Studio {
                 );
             }
             ui.vertical(|ui| {
-                ui.label(RichText::new("shredinini").size(29.0).strong());
+                ui.label(RichText::new("Shredini").size(29.0).strong());
                 ui.label(
-                    RichText::new("A LITTLE GUITAR STUDIO")
+                    RichText::new("YOUR INSTRUMENT STUDIO")
                         .size(10.0)
                         .color(MUTED)
                         .extra_letter_spacing(2.0),
@@ -220,11 +286,116 @@ impl Studio {
                 );
             });
         });
-        ui.add_space(22.0);
+        ui.add_space(12.0);
+        let old_source = self.session.audio.source;
+        let old_sound = self.session.audio.synth_sound;
+        ui.horizontal(|ui| {
+            ui.label("Instrument");
+            ui.add_enabled_ui(self.running.is_none() && !self.pending, |ui| {
+                egui::ComboBox::from_id_salt("instrument_source")
+                    .selected_text(self.session.audio.source.label())
+                    .width(160.0)
+                    .show_ui(ui, |ui| {
+                        for source in [
+                            InstrumentSource::Guitar,
+                            InstrumentSource::MidiKeyboard,
+                            InstrumentSource::GuitarAndMidi,
+                        ] {
+                            ui.selectable_value(
+                                &mut self.session.audio.source,
+                                source,
+                                source.label(),
+                            );
+                        }
+                    });
+            });
+            if self.session.audio.source.has_midi() {
+                egui::ComboBox::from_id_salt("keyboard_sound")
+                    .selected_text(self.session.audio.synth_sound.label())
+                    .width(130.0)
+                    .show_ui(ui, |ui| {
+                        for sound in [
+                            SynthSound::ElectricKeys,
+                            SynthSound::SoftPad,
+                            SynthSound::Bass,
+                        ] {
+                            ui.selectable_value(
+                                &mut self.session.audio.synth_sound,
+                                sound,
+                                sound.label(),
+                            );
+                        }
+                    });
+                if ui.button("All notes off").clicked() {
+                    self.engine.midi.all_notes_off();
+                }
+                if ui
+                    .add_enabled(!self.pending, egui::Button::new("Test sound"))
+                    .clicked()
+                {
+                    if self.running.is_some() {
+                        self.engine.midi.test_sound();
+                    } else {
+                        self.audition_after_start = true;
+                        self.request_start();
+                    }
+                }
+            }
+        });
+        if old_source != self.session.audio.source || old_sound != self.session.audio.synth_sound {
+            if self.session.audio.source.has_midi() {
+                self.prepare_keyboard();
+            }
+            self.changed();
+        }
+        if self.session.audio.source.has_midi() {
+            ui.horizontal(|ui| {
+                let port = self
+                    .midi_ports
+                    .iter()
+                    .find(|p| p.id == self.session.audio.midi_port)
+                    .map_or("Choose MIDI input in Audio & setup", |p| p.name.as_str());
+                ui.label(RichText::new(port).color(ACCENT));
+                let m = &self.engine.midi;
+                let last = m.last_note.load(Relaxed);
+                let note = if last == 0 {
+                    "—".into()
+                } else {
+                    note_name((last - 1) as u8)
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "{} voices · {} MIDI messages · last {note}",
+                        m.voices.load(Relaxed),
+                        m.messages.load(Relaxed)
+                    ))
+                    .size(11.0)
+                    .color(MUTED),
+                );
+            });
+            draw_keyboard(ui, &self.engine.midi);
+            let output = self
+                .devices
+                .iter()
+                .find(|d| {
+                    d.id == self.session.audio.output_id && d.backend == self.session.audio.backend
+                })
+                .map_or("Select an output in Audio & setup", |d| d.name.as_str());
+            ui.label(
+                RichText::new(format!("Output: {output}"))
+                    .size(11.0)
+                    .color(MUTED),
+            );
+        }
+        ui.add_space(12.0);
         egui::Frame::new()
             .fill(CARD)
             .corner_radius(14)
-            .inner_margin(22)
+            .inner_margin(if self.session.audio.source.has_midi() {
+                14
+            } else {
+                22
+            })
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(
@@ -245,7 +416,12 @@ impl Studio {
                     }
                 });
                 ui.label(
-                    RichText::new("Bright, smooth, melodic guitar. Make it yours.").color(MUTED),
+                    RichText::new(if self.session.audio.source.has_midi() {
+                        "Built-in instruments. Your keys, your touch, your sound."
+                    } else {
+                        "Bright, smooth, melodic guitar. Make it yours."
+                    })
+                    .color(MUTED),
                 );
                 ui.add_space(10.0);
                 ui.horizontal_wrapped(|ui| {
@@ -347,7 +523,11 @@ impl Studio {
         egui::Frame::new()
             .fill(CARD)
             .corner_radius(14)
-            .inner_margin(22)
+            .inner_margin(if self.session.audio.source.has_midi() {
+                14
+            } else {
+                22
+            })
             .show(ui, |ui| {
                 control(
                     ui,
@@ -389,8 +569,11 @@ impl Studio {
             });
         ui.add_space(16.0);
         ui.horizontal(|ui| {
-            let ready =
-                !self.session.audio.input_id.is_empty() && !self.session.audio.output_id.is_empty();
+            let ready = (!self.session.audio.source.has_audio()
+                || !self.session.audio.input_id.is_empty())
+                && (!self.session.audio.source.has_midi()
+                    || !self.session.audio.midi_port.is_empty())
+                && !self.session.audio.output_id.is_empty();
             if self.running.is_some() {
                 if ui
                     .add_enabled(
@@ -452,10 +635,13 @@ impl Studio {
                     MUTED
                 }),
         );
-        if self.session.audio.input_id.is_empty() || self.session.audio.output_id.is_empty() {
+        if (self.session.audio.source.has_audio() && self.session.audio.input_id.is_empty())
+            || (self.session.audio.source.has_midi() && self.session.audio.midi_port.is_empty())
+            || self.session.audio.output_id.is_empty()
+        {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("First time here?").color(ACCENT));
-                if ui.link("Select your guitar input and output").clicked() {
+                if ui.link("Select your instrument and output").clicked() {
                     self.settings = true;
                 }
             });
@@ -463,8 +649,12 @@ impl Studio {
         if let Some(info) = &self.running {
             ui.label(
                 RichText::new(format!(
-                    "{} Hz → {} Hz  ·  {}  ·  app queue + resampler ≈ {:.1} ms",
-                    info.input_rate,
+                    "{} → {} Hz  ·  {}  ·  app queue + resampler ≈ {:.1} ms",
+                    if info.source.has_audio() {
+                        format!("{} Hz", info.input_rate)
+                    } else {
+                        "MIDI".into()
+                    },
                     info.output_rate,
                     self.session.audio.backend.label(),
                     f32::from_bits(self.engine.diagnostics.app_latency_ms.load(Relaxed))
@@ -504,23 +694,37 @@ impl Studio {
         egui::Window::new("Audio & setup").open(&mut open).default_width(620.0).default_height(720.0).max_height((ctx.viewport_rect().height()-70.0).max(200.0)).resizable(true).show(ctx,|ui|{
             egui::ScrollArea::vertical().max_height(620.0).show(ui,|ui|{
                 ui.heading("Connect. Set your level. Play.");
+                if self.session.audio.source.has_audio() {
                 ui.label("1. Connect guitar → TONEX ONE input, then USB → computer.");
                 ui.label("2. In IK’s TONEX Editor, bypass pedal processing (Stomp mode) and turn direct monitoring off.");
                 ui.label("3. For ASIO, install IK’s TONEX ONE driver from IK Product Manager → Hardware.");
                 ui.label("4. Choose TONEX output for headphones on the pedal, or WASAPI for a wired computer output.");
                 ui.hyperlink_to("IK’s TONEX ONE setup guide","https://www.ikmultimedia.com/contact-support/quickfaq.php?id=1298&quick=QUICKHW");
+                }
+                if self.session.audio.source.has_midi() {
+                    ui.label("Connect your MPK mini or another USB MIDI keyboard. Shredini generates the instrument sound; no guitar input is needed in MIDI-only mode.");
+                    ui.label("Select a MIDI input and a stereo output, press Start, then play. Keys and note-mode pads play notes; sustain, pitch bend and modulation are supported.");
+                }
                 ui.separator();
                 ui.add_enabled_ui(self.running.is_none() && !self.pending,|ui|{
+                    if self.session.audio.source.has_midi() {
+                        ui.label("MIDI keyboard input");
+                        let selected=self.midi_ports.iter().find(|p|p.id==self.session.audio.midi_port).map_or("Select a MIDI keyboard…",|p|p.name.as_str());
+                        egui::ComboBox::from_id_salt("midi_port").selected_text(selected).width(520.0).show_ui(ui,|ui|{
+                            for port in &self.midi_ports {ui.selectable_value(&mut self.session.audio.midi_port,port.id.clone(),&port.name);}
+                        });
+                    }
                     egui::ComboBox::from_id_salt("backend").selected_text(self.session.audio.backend.label()).show_ui(ui,|ui|{
                         ui.selectable_value(&mut self.session.audio.backend,Backend::Asio,Backend::Asio.label());
                         ui.selectable_value(&mut self.session.audio.backend,Backend::Wasapi,Backend::Wasapi.label());
                     });
                     let backend=self.session.audio.backend;
-                    device_picker(ui,"Guitar input",&self.devices,backend,true,&mut self.session.audio.input_id);
-                    if backend==Backend::Asio {
+                    if self.session.audio.source.has_audio() {device_picker(ui,"Guitar input",&self.devices,backend,true,&mut self.session.audio.input_id);}
+                    if backend==Backend::Asio && self.session.audio.source.has_audio() {
                         self.session.audio.output_id=self.session.audio.input_id.clone();
                         ui.weak("ASIO uses the same interface for capture and playback.");
                     } else {device_picker(ui,"Stereo output",&self.devices,backend,false,&mut self.session.audio.output_id);}
+                    if self.session.audio.source.has_audio() {
                     let channels=self.devices.iter().find(|d|d.id==self.session.audio.input_id && d.backend==backend).map_or(2,|d|d.input_channels).max(1);
                     ui.horizontal(|ui|{
                         ui.label("Guitar channel");
@@ -528,6 +732,7 @@ impl Studio {
                         ui.add(egui::DragValue::new(&mut channel).range(1..=channels));
                         self.session.audio.input_channel=channel-1;
                     });
+                    }
                     egui::ComboBox::from_id_salt("buffer").selected_text(buffer_label(self.session.audio.buffer_frames)).show_ui(ui,|ui|{
                         for n in [128,256,512,0] {ui.selectable_value(&mut self.session.audio.buffer_frames,n,buffer_label(n));}
                     });
@@ -536,17 +741,25 @@ impl Studio {
                 });
                 if self.running.is_some() {ui.weak("Stop monitoring to change audio devices or buffer size.");}
                 ui.add(egui::Slider::new(&mut self.session.parameters.input_trim_db,-24.0..=24.0).text("Input trim").suffix(" dB").fixed_decimals(1));
+                if self.session.audio.source.has_audio() {
                 ui.weak("Digital trim cannot repair clipping at the pedal’s input. Use the pedal’s input trim first.");
                 if !self.device_note.is_empty(){ui.colored_label(Color32::from_rgb(241,197,135),&self.device_note);}
+                }
+                if self.session.audio.source.has_midi() && !self.midi_note.is_empty() {ui.colored_label(Color32::YELLOW,&self.midi_note);}
                 ui.separator();ui.heading("Diagnostics");
                 let d=&self.engine.diagnostics;
                 ui.label(format!("Underruns: {}  ·  Dropped input frames: {}  ·  Driver xruns: {}  ·  Resyncs: {}",
                     d.underruns.load(Relaxed),d.overruns.load(Relaxed),d.xruns.load(Relaxed),d.resyncs.load(Relaxed)));
                 ui.label(format!("Input queue: {} frames  ·  Clock correction: {:+.0} ppm",d.queue_frames.load(Relaxed),f32::from_bits(d.correction_ppm.load(Relaxed))));
+                if self.session.audio.source.has_midi() {
+                    let m=&self.engine.midi;
+                    ui.label(format!("MIDI messages: {} · Dropped MIDI events: {} · Active voices: {}",m.messages.load(Relaxed),m.dropped.load(Relaxed),m.voices.load(Relaxed)));
+                    ui.weak("The note display lights when MIDI notes reach the synthesizer. All notes off clears held/sustained notes if a controller misses a release.");
+                }
                 if let Some(info)=&self.running {
-                    ui.label(format!("Input: {} Hz / {} ch / {} / {}",info.input_rate,info.input_channels,info.input_format,actual_buffer(info.input_buffer)));
+                    if info.source.has_audio() {ui.label(format!("Input: {} Hz / {} ch / {} / {}",info.input_rate,info.input_channels,info.input_format,actual_buffer(info.input_buffer)));}
                     ui.label(format!("Output: {} Hz / {} ch / {} / {}",info.output_rate,info.output_channels,info.output_format,actual_buffer(info.output_buffer)));
-                    ui.label(if info.resampling {"Adaptive sinc conversion: active"}else{"Adaptive sinc conversion: off (shared ASIO clock)"});
+                    ui.label(if info.resampling {"Adaptive sinc conversion: active"}else if info.source.has_audio() {"Adaptive sinc conversion: off (shared ASIO clock)"}else{"Keyboard: generated directly at the output sample rate"});
                     let driver_ms=info.input_buffer.zip(info.output_buffer).map(|(i,o)|1000.0*(i as f32/info.input_rate as f32+o as f32/info.output_rate as f32));
                     if let Some(ms)=driver_ms {ui.label(format!("Reported driver buffer duration (input + output): {ms:.1} ms"));}
                 }
@@ -655,11 +868,64 @@ impl eframe::App for Studio {
     }
 }
 
+fn note_name(note: u8) -> String {
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    format!("{}{}", NAMES[note as usize % 12], note as i32 / 12 - 1)
+}
+fn draw_keyboard(ui: &mut egui::Ui, state: &midi::State) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().min(420.0), 28.0),
+        egui::Sense::hover(),
+    );
+    let notes = [state.notes[0].load(Relaxed), state.notes[1].load(Relaxed)];
+    let last = state.last_note.load(Relaxed).saturating_sub(1);
+    let base = if last == 0 {
+        48
+    } else {
+        (last / 12 * 12).clamp(12, 96)
+    } as u8;
+    let w = rect.width() / 14.0;
+    let mut white = 0;
+    for black_pass in [false, true] {
+        for note in base..base + 24 {
+            let black = [1, 3, 6, 8, 10].contains(&(note % 12));
+            let held = notes[note as usize / 64] & (1_u64 << (note % 64)) != 0;
+            if black == black_pass {
+                let (x, width, height) = if black {
+                    ((white as f32 - 0.32) * w, w * 0.64, rect.height() * 0.63)
+                } else {
+                    (white as f32 * w, w - 1.0, rect.height())
+                };
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(rect.left() + x, rect.top()),
+                        egui::vec2(width, height),
+                    ),
+                    2.0,
+                    if held {
+                        ACCENT
+                    } else if black {
+                        Color32::from_rgb(17, 22, 29)
+                    } else {
+                        Color32::from_rgb(105, 118, 132)
+                    },
+                );
+            }
+            if !black {
+                white += 1;
+            }
+        }
+        white = 0;
+    }
+}
+
 fn control(ui: &mut egui::Ui, title: &str, subtitle: &str, value: &mut f32) {
     ui.horizontal(|ui| {
         let label = ui
             .allocate_ui_with_layout(
-                egui::vec2(245.0, 50.0),
+                egui::vec2(245.0, 42.0),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_min_width(245.0);

@@ -1,10 +1,12 @@
 # Third-party components
 
-Shredinini's original source is MIT licensed. Dependency versions and sources are
+Shredini's original source is MIT licensed. Dependency versions and sources are
 recorded in Cargo.lock. The application uses CPAL (Apache-2.0), egui/eframe
 (MIT OR Apache-2.0), ringbuf (MIT OR Apache-2.0), Rubato (MIT), biquad (MIT),
 Serde (MIT OR Apache-2.0), and their transitive dependencies under their respective
 licenses. Dependency license texts remain available in their published sources.
+USB MIDI connectivity uses midir (MIT). The instrument oscillator/envelope code
+is part of Shredini; it contains no sampled commercial instrument recordings.
 
 ASIO is a trademark and software of Steinberg Media Technologies GmbH.
 ASIO-enabled builds include Steinberg ASIO SDK components. The SDK provides

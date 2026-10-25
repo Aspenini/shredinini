@@ -2,7 +2,8 @@
 //! preallocated audio state, an SPSC ring, and lock-free scalar atomics.
 use crate::{
     dsp::Processor,
-    model::{AudioConfig, Backend, SharedParameters},
+    midi,
+    model::{AudioConfig, Backend, InstrumentSource, SharedParameters},
 };
 use anyhow::{Context, Result, bail};
 use cpal::{
@@ -35,6 +36,7 @@ pub struct DeviceInfo {
     pub backend: Backend,
     pub input_channels: usize,
     pub output_channels: usize,
+    pub default_output: bool,
 }
 #[derive(Default)]
 pub struct Diagnostics {
@@ -93,12 +95,14 @@ pub enum Command {
 }
 pub enum Event {
     Devices(Vec<DeviceInfo>, String),
+    MidiDevices(Vec<midi::Port>, String),
     Running(RunningInfo),
     Stopped,
     Failed(String),
 }
 #[derive(Clone)]
 pub struct RunningInfo {
+    pub source: InstrumentSource,
     pub input_rate: u32,
     pub output_rate: u32,
     pub input_buffer: Option<u32>,
@@ -114,6 +118,7 @@ pub struct Engine {
     pub commands: SyncSender<Command>,
     pub events: Receiver<Event>,
     pub diagnostics: Arc<Diagnostics>,
+    pub midi: Arc<midi::State>,
     thread: Option<thread::JoinHandle<()>>,
 }
 impl Engine {
@@ -122,24 +127,31 @@ impl Engine {
         let (tx, events) = mpsc::channel();
         let diagnostics = Arc::new(Diagnostics::default());
         let d = diagnostics.clone();
+        let midi = Arc::new(midi::State::default());
+        let m = midi.clone();
         let handle=thread::Builder::new().name("audio-control".into()).spawn(move || {
-            let mut streams:Option<(Stream,Stream)>=None;
+            let mut streams:Option<ActiveStreams>=None;
             let mut last_counts=(0,0);
             let mut last_activity=Instant::now();
+            let mut last_midi_check=Instant::now();
             let (devices,note)=enumerate_devices();
             let _=tx.send(Event::Devices(devices,note));
+            let (ports,note)=midi::enumerate();let _=tx.send(Event::MidiDevices(ports,note));
             loop {
                 match rx.recv_timeout(Duration::from_millis(25)) {
                     Ok(Command::Shutdown)|Err(mpsc::RecvTimeoutError::Disconnected)=>break,
                     Ok(Command::Refresh)=>{
-                        if streams.is_none() { let (devices,note)=enumerate_devices(); let _=tx.send(Event::Devices(devices,note)); }
+                        if streams.is_none() {
+                            let (devices,note)=enumerate_devices(); let _=tx.send(Event::Devices(devices,note));
+                            let (ports,note)=midi::enumerate();let _=tx.send(Event::MidiDevices(ports,note));
+                        }
                     }
-                    Ok(Command::Stop)=>{streams=None;let _=tx.send(Event::Stopped);}
+                    Ok(Command::Stop)=>{streams=None;m.clear_activity();let _=tx.send(Event::Stopped);}
                     Ok(Command::Start(config))=>{
-                        streams=None; d.reset();
-                        match open_streams(&config,parameters.clone(),d.clone()) {
-                            Ok((input,output,info))=>{
-                                streams=Some((input,output)); last_counts=(0,0);last_activity=Instant::now();
+                        streams=None; d.reset();m.clear_activity();m.messages.store(0,Relaxed);m.dropped.store(0,Relaxed);m.set_sound(config.synth_sound);
+                        match open_streams(&config,parameters.clone(),d.clone(),m.clone()) {
+                            Ok((active,info))=>{
+                                streams=Some(active); last_counts=(0,0);last_activity=Instant::now();last_midi_check=Instant::now();
                                 let _=tx.send(Event::Running(info));
                             }
                             Err(e)=>{let _=tx.send(Event::Failed(format!("{e:#}")));}
@@ -147,14 +159,19 @@ impl Engine {
                     }
                     Err(mpsc::RecvTimeoutError::Timeout)=>{}
                 }
-                if streams.is_some() {
+                if let Some(active)=streams.as_ref() {
                     let counts=(d.input_frames.load(Relaxed),d.output_frames.load(Relaxed));
-                    if counts.0!=last_counts.0 && counts.1!=last_counts.1 {
+                    if (active.input.is_none() || counts.0!=last_counts.0) && counts.1!=last_counts.1 {
                         last_activity=Instant::now();last_counts=counts;
                     }
+                    if let Some(id)=active.midi_port.as_ref() && last_midi_check.elapsed()>Duration::from_secs(1) {
+                            last_midi_check=Instant::now();
+                            let (ports,_)=midi::enumerate();
+                            if !ports.iter().any(|p|p.id==*id) {d.fatal.store(true,Relaxed);}
+                    }
                     if d.fatal.load(Relaxed) || last_activity.elapsed()>Duration::from_secs(3) {
-                        d.fatal.store(true,Relaxed); streams=None;
-                        let _=tx.send(Event::Failed("Audio device stopped or changed. Check its connection and driver, then use Reconnect. The selected output has not been changed.".into()));
+                        d.fatal.store(true,Relaxed); streams=None;m.clear_activity();
+                        let _=tx.send(Event::Failed("Audio or MIDI device stopped or changed. Check its connection and driver, then use Reconnect. The selected output has not been changed.".into()));
                     }
                 }
             }
@@ -164,12 +181,20 @@ impl Engine {
             commands,
             events,
             diagnostics,
+            midi,
             thread: Some(handle),
         }
     }
     pub fn send(&self, command: Command) -> bool {
         self.commands.try_send(command).is_ok()
     }
+}
+
+struct ActiveStreams {
+    input: Option<Stream>,
+    _output: Stream,
+    _midi: Option<midir::MidiInputConnection<()>>,
+    midi_port: Option<String>,
 }
 impl Drop for Engine {
     fn drop(&mut self) {
@@ -198,8 +223,13 @@ pub fn enumerate_devices() -> (Vec<DeviceInfo>, String) {
     let mut result = Vec::new();
     let mut notes = Vec::new();
     for backend in [Backend::Asio, Backend::Wasapi] {
-        match host(backend).and_then(|h| Ok(h.devices()?)) {
-            Ok(devices) => {
+        match host(backend).and_then(|h| {
+            Ok((
+                h.default_output_device().and_then(|d| d.id().ok()),
+                h.devices()?,
+            ))
+        }) {
+            Ok((default_output, devices)) => {
                 for d in devices {
                     let Ok(id) = d.id() else { continue };
                     let input_channels = d
@@ -219,6 +249,7 @@ pub fn enumerate_devices() -> (Vec<DeviceInfo>, String) {
                             backend,
                             input_channels,
                             output_channels,
+                            default_output: default_output.as_ref() == Some(&id),
                         });
                     }
                 }
@@ -331,7 +362,11 @@ fn open_streams(
     config: &AudioConfig,
     parameters: Arc<SharedParameters>,
     d: Arc<Diagnostics>,
-) -> Result<(Stream, Stream, RunningInfo)> {
+    midi_state: Arc<midi::State>,
+) -> Result<(ActiveStreams, RunningInfo)> {
+    if !config.source.has_audio() {
+        return open_keyboard(config, parameters, d, midi_state);
+    }
     let h = host(config.backend)?;
     if config.backend == Backend::Asio && config.input_id != config.output_id {
         bail!(
@@ -376,9 +411,11 @@ fn open_streams(
             config,
             parameters.clone(),
             d.clone(),
+            midi_state.clone(),
         ) {
-            Ok((i, o, resampling)) => {
+            Ok((i, o, resampling, connection)) => {
                 let info = RunningInfo {
+                    source: config.source,
                     input_rate: is.sample_rate,
                     output_rate: os.sample_rate,
                     input_buffer: i.buffer_size().ok(),
@@ -392,7 +429,15 @@ fn open_streams(
                 // Both ASIO streams must be built before either is started.
                 i.play().context("Start guitar capture")?;
                 o.play().context("Start playback")?;
-                return Ok((i, o, info));
+                return Ok((
+                    ActiveStreams {
+                        input: Some(i),
+                        _output: o,
+                        _midi: connection,
+                        midi_port: config.source.has_midi().then(|| config.midi_port.clone()),
+                    },
+                    info,
+                ));
             }
             Err(e) => last_error = Some(e),
         }
@@ -413,7 +458,8 @@ fn prepare_pair(
     config: &AudioConfig,
     parameters: Arc<SharedParameters>,
     d: Arc<Diagnostics>,
-) -> Result<(Stream, Stream, bool)> {
+    midi_state: Arc<midi::State>,
+) -> Result<(Stream, Stream, bool, Option<midir::MidiInputConnection<()>>)> {
     let (producer, consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
     let resampling = config.backend == Backend::Wasapi;
     let requested = match ic.buffer_size {
@@ -427,7 +473,7 @@ fn prepare_pair(
     } else {
         requested.max(CHUNK)
     };
-    let monitor = Monitor::new(
+    let mut monitor = Monitor::new(
         consumer,
         ic.sample_rate,
         oc.sample_rate,
@@ -436,6 +482,11 @@ fn prepare_pair(
         parameters,
         d.clone(),
     )?;
+    let connection = if config.source.has_midi() {
+        Some(attach_keyboard(&mut monitor, config, midi_state)?)
+    } else {
+        None
+    };
     macro_rules! capture {
         ($t:ty) => {
             build_capture::<$t>(input, ic.clone(), config.input_channel, producer, d.clone())?
@@ -455,6 +506,17 @@ fn prepare_pair(
         SampleFormat::U64 => capture!(u64),
         _ => bail!("Unsupported capture sample format"),
     };
+    let o = open_playback(output, oc, ofmt, monitor, d)?;
+    Ok((i, o, resampling, connection))
+}
+
+fn open_playback(
+    output: &Device,
+    oc: &StreamConfig,
+    ofmt: SampleFormat,
+    monitor: Monitor,
+    d: Arc<Diagnostics>,
+) -> Result<Stream> {
     macro_rules! playback {
         ($t:ty) => {
             build_playback::<$t>(output, oc.clone(), monitor, d)?
@@ -474,7 +536,89 @@ fn prepare_pair(
         SampleFormat::U64 => playback!(u64),
         _ => bail!("Unsupported playback sample format"),
     };
-    Ok((i, o, resampling))
+    Ok(o)
+}
+
+fn attach_keyboard(
+    monitor: &mut Monitor,
+    config: &AudioConfig,
+    state: Arc<midi::State>,
+) -> Result<midir::MidiInputConnection<()>> {
+    let (producer, consumer) = HeapRb::<midi::Message>::new(midi::QUEUE_CAPACITY).split();
+    let connection = midi::connect(&config.midi_port, producer, state.clone())?;
+    monitor.instrument = Some(midi::Instrument::new(consumer, state, monitor.output_rate));
+    Ok(connection)
+}
+
+fn open_keyboard(
+    config: &AudioConfig,
+    parameters: Arc<SharedParameters>,
+    d: Arc<Diagnostics>,
+    state: Arc<midi::State>,
+) -> Result<(ActiveStreams, RunningInfo)> {
+    let h = host(config.backend)?;
+    let output = h
+        .device_by_id(&config.output_id.parse().context("Select a stereo output")?)
+        .context("Selected output is disconnected")?;
+    let preferred = output.default_output_config()?.sample_rate();
+    let supported = select_config(&output, false, preferred, 2, false)?;
+    let mut stream_config = stream_config(&supported, config.buffer_frames);
+    let mut error = None;
+    for attempt in 0..2 {
+        if attempt == 1 {
+            if config.buffer_frames == 0 {
+                break;
+            }
+            stream_config.buffer_size = cpal::BufferSize::Default;
+            d.reset();
+        }
+        let (_, consumer) = HeapRb::<f32>::new(1).split();
+        let mut monitor = Monitor::new(
+            consumer,
+            stream_config.sample_rate,
+            stream_config.sample_rate,
+            false,
+            128,
+            parameters.clone(),
+            d.clone(),
+        )?;
+        monitor.audio_enabled = false;
+        let connection = attach_keyboard(&mut monitor, config, state.clone())?;
+        match open_playback(
+            &output,
+            &stream_config,
+            supported.sample_format(),
+            monitor,
+            d.clone(),
+        ) {
+            Ok(output) => {
+                let info = RunningInfo {
+                    source: config.source,
+                    input_rate: 0,
+                    output_rate: stream_config.sample_rate,
+                    input_buffer: None,
+                    output_buffer: output.buffer_size().ok(),
+                    input_channels: 0,
+                    output_channels: stream_config.channels as usize,
+                    resampling: false,
+                    input_format: "MIDI notes".into(),
+                    output_format: format!("{:?}", supported.sample_format()),
+                };
+                output.play().context("Start keyboard audio")?;
+                return Ok((
+                    ActiveStreams {
+                        input: None,
+                        _output: output,
+                        _midi: Some(connection),
+                        midi_port: Some(config.midi_port.clone()),
+                    },
+                    info,
+                ));
+            }
+            Err(e) => error = Some(e),
+        }
+    }
+    Err(error.unwrap_or_else(|| anyhow::anyhow!("Unable to open output")))
 }
 
 fn stream_error(d: &Diagnostics, error: cpal::Error) {
@@ -578,6 +722,8 @@ impl DriftController {
 }
 
 pub struct Monitor {
+    instrument: Option<midi::Instrument>,
+    audio_enabled: bool,
     consumer: HeapCons<f32>,
     resampler: Option<Async<f32>>,
     input: Vec<f32>,
@@ -624,6 +770,8 @@ impl Monitor {
         let filter_delay = resampler.as_ref().map_or(0, |r| r.output_delay());
         let p = parameters.read();
         Ok(Self {
+            instrument: None,
+            audio_enabled: true,
             consumer,
             resampler,
             input: vec![0.0; input_length],
@@ -727,14 +875,29 @@ impl Monitor {
         let mut maximum = 0.0_f32;
         let mut clips = 0;
         let frames = output.len() / channels;
+        if let Some(instrument) = &mut self.instrument {
+            instrument.begin_block();
+        }
+        let mut capture_available = self.audio_enabled;
+        let mut source_peak = 0.0_f32;
         for (index, frame) in output.chunks_exact_mut(channels).enumerate() {
-            if self.d.fatal.load(Relaxed) || (self.position >= self.available && !self.refill()) {
+            if capture_available && self.position >= self.available && !self.refill() {
+                capture_available = false;
+            }
+            if self.d.fatal.load(Relaxed) || (!capture_available && self.instrument.is_none()) {
                 // Startup prefill is intentional silence, not a dropout.
                 output[index * channels..].fill(T::EQUILIBRIUM);
                 break;
             }
-            let mono = self.converted[self.position];
-            self.position += 1;
+            let mut mono = 0.0;
+            if capture_available {
+                mono = self.converted[self.position];
+                self.position += 1;
+            }
+            if let Some(instrument) = &mut self.instrument {
+                mono += instrument.tick();
+            }
+            source_peak = source_peak.max(mono.abs());
             self.bypass +=
                 (self.bypass_target - self.bypass) * (1.0 / (0.020 * self.output_rate as f32));
             let stereo = self.processor.tick(mono, self.bypass);
@@ -752,6 +915,12 @@ impl Monitor {
         peak(&self.d.output_peak, maximum);
         self.d.output_clips.fetch_add(clips, Relaxed);
         self.d.output_frames.fetch_add(frames as u64, Relaxed);
+        if let Some(instrument) = &self.instrument {
+            instrument.publish_activity();
+        }
+        if !self.audio_enabled {
+            peak(&self.d.input_peak, source_peak);
+        }
     }
 }
 
@@ -868,6 +1037,51 @@ mod tests {
                 monitor.render(&mut output, 2);
             });
             assert_eq!(allocations, 0, "resampling={resampling}");
+        }
+    }
+    #[test]
+    fn midi_only_and_layered_callbacks_work_without_allocating() {
+        for audio_enabled in [false, true] {
+            let (mut capture, consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
+            let (mut notes, midi_queue) =
+                HeapRb::<midi::Message>::new(midi::QUEUE_CAPACITY).split();
+            let d = Arc::new(Diagnostics::default());
+            let p = Arc::new(SharedParameters::new(ToneParameters {
+                delay: 0.0,
+                reverb: 0.0,
+                ..Default::default()
+            }));
+            let state = Arc::new(midi::State::default());
+            let mut monitor =
+                Monitor::new(consumer, 48000, 48000, false, 128, p, d.clone()).unwrap();
+            monitor.audio_enabled = audio_enabled;
+            monitor.instrument = Some(midi::Instrument::new(midi_queue, state.clone(), 48000));
+            let mut out = [0.0_f32; 256];
+            capture.push_slice(&[0.0; 512]);
+            let mut energy = 0.0_f32;
+            let allocations = crate::allocation_probe::count(|| {
+                notes.try_push(midi::Message::On(0, 60, 127)).unwrap();
+                for block in 0..1500 {
+                    if audio_enabled {
+                        capture.push_slice(&[0.0; 128]);
+                    }
+                    if block == 400 {
+                        notes.try_push(midi::Message::Off(0, 60)).unwrap();
+                    }
+                    monitor.render(&mut out, 2);
+                    for x in out {
+                        assert!(x.is_finite() && x.abs() < 1.0);
+                        energy += x.abs();
+                    }
+                }
+            });
+            assert_eq!(allocations, 0);
+            assert!(energy > 1.0);
+            assert_eq!(d.underruns.load(Relaxed), 0);
+            assert_eq!(state.voices.load(Relaxed), 0);
+            d.fatal.store(true, Relaxed);
+            monitor.render(&mut out, 2);
+            assert!(out.iter().all(|x| *x == 0.0));
         }
     }
 }

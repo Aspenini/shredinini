@@ -113,6 +113,9 @@ impl Backend {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
+    pub source: InstrumentSource,
+    pub midi_port: String,
+    pub synth_sound: SynthSound,
     pub backend: Backend,
     pub input_id: String,
     pub output_id: String,
@@ -123,11 +126,68 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
+            source: InstrumentSource::Guitar,
+            midi_port: String::new(),
+            synth_sound: SynthSound::ElectricKeys,
             backend: Backend::Asio,
             input_id: String::new(),
             output_id: String::new(),
             input_channel: 0,
             buffer_frames: 128,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstrumentSource {
+    #[default]
+    Guitar,
+    MidiKeyboard,
+    GuitarAndMidi,
+}
+impl InstrumentSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Guitar => "Guitar / audio",
+            Self::MidiKeyboard => "MIDI keyboard",
+            Self::GuitarAndMidi => "Guitar + MIDI",
+        }
+    }
+    pub fn has_audio(self) -> bool {
+        self != Self::MidiKeyboard
+    }
+    pub fn has_midi(self) -> bool {
+        self != Self::Guitar
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SynthSound {
+    #[default]
+    ElectricKeys,
+    SoftPad,
+    Bass,
+}
+impl SynthSound {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ElectricKeys => "Electric Keys",
+            Self::SoftPad => "Soft Pad",
+            Self::Bass => "Round Bass",
+        }
+    }
+    pub fn index(self) -> u32 {
+        match self {
+            Self::ElectricKeys => 0,
+            Self::SoftPad => 1,
+            Self::Bass => 2,
+        }
+    }
+    pub fn from_index(i: u32) -> Self {
+        match i {
+            1 => Self::SoftPad,
+            2 => Self::Bass,
+            _ => Self::ElectricKeys,
         }
     }
 }

@@ -29,6 +29,7 @@ impl Default for Session {
 }
 
 pub fn session_path() -> Option<PathBuf> {
+    // Keep the original storage identifier so the rename preserves saved tones and devices.
     directories::ProjectDirs::from("", "", "Shredinini")
         .map(|d| d.data_local_dir().join("session.json"))
 }
@@ -140,5 +141,17 @@ mod tests {
         assert_eq!(s.parameters.tone, 1.0);
         assert_eq!(s.parameters.output_db, 0.0);
         assert_eq!(s.audio.buffer_frames, 128);
+    }
+    #[test]
+    fn old_sessions_default_to_guitar_and_keyboard_settings_round_trip() {
+        use crate::model::{InstrumentSource, SynthSound};
+        let old = decode(r#"{"version":1,"audio":{"backend":"Wasapi"}}"#).unwrap();
+        assert_eq!(old.audio.source, InstrumentSource::Guitar);
+        let mut session = old;
+        session.audio.source = InstrumentSource::GuitarAndMidi;
+        session.audio.midi_port = "mpk-mini-port".into();
+        session.audio.synth_sound = SynthSound::SoftPad;
+        let restored = decode(&serde_json::to_string(&session).unwrap()).unwrap();
+        assert_eq!(restored.audio, session.audio);
     }
 }

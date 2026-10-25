@@ -33,10 +33,13 @@ try {
     & cargo @cargoArguments
     if ($LASTEXITCODE -ne 0) { throw 'Rust build failed.' }
     if ($Package) {
-        $packageName = if ($NoAsio) { 'Shredinini-0.1.0-windows-x64-wasapi' } else { 'Shredinini-0.1.0-windows-x64' }
+        $versionLine = Get-Content -LiteralPath (Join-Path $projectRoot 'Cargo.toml') | Where-Object { $_ -match '^version\s*=' } | Select-Object -First 1
+        $packageVersion = [regex]::Match($versionLine, '"([^"]+)"').Groups[1].Value
+        $packageName = "Shredini-$packageVersion-windows-x64"
+        if ($NoAsio) { $packageName += '-wasapi' }
         $packageDirectory = Join-Path $projectRoot "dist\$packageName"
         New-Item -ItemType Directory -Force -Path $packageDirectory | Out-Null
-        Copy-Item -LiteralPath (Join-Path $projectRoot 'target\release\shredinini.exe') -Destination $packageDirectory -Force
+        Copy-Item -LiteralPath (Join-Path $projectRoot 'target\release\shredini.exe') -Destination $packageDirectory -Force
         foreach ($document in @('README.md', 'VALIDATION.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md')) {
             Copy-Item -LiteralPath (Join-Path $projectRoot $document) -Destination $packageDirectory -Force
         }

@@ -5,7 +5,7 @@ software verification from checks that require the TONEX ONE hardware.
 
 ## Automated checks
 
-`cargo test --release --locked`: **8 passed, 0 failed**, completed in 1.58 s
+`cargo test --release --locked`: **15 passed, 0 failed**, completed in 1.47 s
 on the final build with the statically linked Windows C runtime.
 Formatting and Clippy (`--all-targets --all-features -- -D warnings`) passed.
 The filesystem's incremental-cache hard-link warning does not affect compilation.
@@ -22,6 +22,14 @@ The filesystem's incremental-cache hard-link warning does not affect compilation
 - Persistence: round-trip user presets/settings, replace an existing file on
   Windows, recover malformed JSON while preserving the original, reject future
   schema versions, and bound persisted numeric controls.
+- MIDI: note-on/off (including velocity-zero note-on), channel handling, pitch
+  bend, velocity response, sustain/release, voice stealing and all-notes-off.
+- All three instrument sounds and both MIDI-only and guitar+MIDI render paths
+  produce bounded finite output without callback allocations. MIDI-only playback
+  needs no capture samples, does not report capture underruns, and mutes on faults.
+- Legacy sessions default to guitar; MIDI source, port and sound persist correctly.
+- The Test sound tone generates without MIDI notes, ends automatically, and does
+  not allocate or increment the hardware MIDI message counter.
 
 Observed drift simulations (90 seconds each, 512-frame queue target):
 
@@ -34,9 +42,30 @@ Observed drift simulations (90 seconds each, 512-frame queue target):
 
 ## Desktop checks
 
+### MIDI hardware check (Shredini 0.2.0)
+
+- Detected the connected **MPK mini 3** through the Windows MIDI API.
+- The packaged application selected MIDI keyboard / Electric Keys and opened
+  WASAPI playback at **48 kHz** with no guitar capture device selected.
+- Observed **72 incoming hardware MIDI messages**, last note **A3**, and **13
+  active synth voices** during playing. The engine remained LIVE, confirming
+  that MIDI note input reaches the real-time synthesizer on this machine.
+- The actual saved session retained MIDI source, keyboard port, Electric Keys,
+  selected output and tone edits in the existing application-data location.
+- In 0.2.1, verified the displayed output is **Headphones (Arctis Nova 7P)**,
+  matching the user's selection. Test sound opens MIDI/WASAPI playback from
+  standby and returns the engine to LIVE at 48 kHz. On October 24, 2026, the user
+  confirmed hearing the test note through the Arctis headphones.
+- Physical sustain/joystick testing and USB unplug/replug testing remain separate
+  from the automated protocol tests. No measured MIDI
+  key-to-speaker latency is claimed.
+
+### Original guitar/UI checks
+
 - Native application launches and renders its main window.
 - Windows endpoint enumeration works. On this machine it exposes WASAPI capture
-  and stereo playback endpoints. No TONEX ONE or ASIO device was enumerated.
+  and stereo playback endpoints. No TONEX ONE or ASIO device was enumerated in
+  the initial guitar validation.
 - Monitoring does not start automatically.
 - Native UI automation verified opening/closing setup, enumerating the input
   picker, loading Warm Clean and restoring Crystal Clean, and the save dialog's
