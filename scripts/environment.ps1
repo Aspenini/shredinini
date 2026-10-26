@@ -1,3 +1,4 @@
+param([switch]$Asio)
 # Import only compiler-related settings; do not echo the process environment.
 $ErrorActionPreference = 'Stop'
 if (-not $env:VCINSTALLDIR) {
@@ -22,10 +23,19 @@ if (-not $env:VCINSTALLDIR) {
         if ($parts.Count -eq 2 -and $parts[0] -in $compilerKeys) { [Environment]::SetEnvironmentVariable($parts[0],$parts[1],'Process') }
     }
 }
-if (-not $env:LIBCLANG_PATH) { $env:LIBCLANG_PATH = 'C:\Program Files\LLVM\bin' }
-# Use an explicit target rather than relying on libclang's host defaults.
-if (-not $env:BINDGEN_EXTRA_CLANG_ARGS) { $env:BINDGEN_EXTRA_CLANG_ARGS = '--target=x86_64-pc-windows-msvc' }
-$projectSdk = Join-Path $PSScriptRoot '..\target\asio-sdk-download\ASIOSDK'
-if (-not $env:CPAL_ASIO_DIR -and (Test-Path -LiteralPath (Join-Path $projectSdk 'common\asio.h'))) {
-    $env:CPAL_ASIO_DIR = (Resolve-Path -LiteralPath $projectSdk).Path
+if ($Asio) {
+    # Other toolchains (notably ESP32) set LIBCLANG_PATH globally. Prefer the
+    # installed desktop LLVM for this process; never change the user's OS settings.
+    $desktopClang = Join-Path $env:ProgramFiles 'LLVM\bin'
+    if (Test-Path -LiteralPath (Join-Path $desktopClang 'libclang.dll')) {
+        $env:LIBCLANG_PATH = $desktopClang
+    } elseif (-not $env:LIBCLANG_PATH -or $env:LIBCLANG_PATH -match 'xtensa|esp-clang') {
+        throw 'ASIO requires desktop LLVM/Clang. Install LLVM in Program Files\LLVM, or set LIBCLANG_PATH to a Windows desktop LLVM installation. Plain cargo run works without ASIO.'
+    }
+    # Embedded Clang defaults can select macOS SDK branches and 32-bit pointers.
+    $env:BINDGEN_EXTRA_CLANG_ARGS = '--target=x86_64-pc-windows-msvc'
+    $projectSdk = Join-Path $PSScriptRoot '..\target\asio-sdk-download\ASIOSDK'
+    if (-not $env:CPAL_ASIO_DIR -and (Test-Path -LiteralPath (Join-Path $projectSdk 'common\asio.h'))) {
+        $env:CPAL_ASIO_DIR = (Resolve-Path -LiteralPath $projectSdk).Path
+    }
 }

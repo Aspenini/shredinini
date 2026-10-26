@@ -107,6 +107,17 @@ impl Processor {
         result.current = result.target;
         result
     }
+    pub fn use_full_instrument_range(&mut self, rate: u32) {
+        self.high_pass = DirectForm2Transposed::new(
+            Coefficients::<f32>::from_params(
+                Type::HighPass,
+                (rate as f32).hz(),
+                20.0.hz(),
+                Q_BUTTERWORTH_F32,
+            )
+            .expect("valid instrument sample rate"),
+        );
+    }
     pub fn set_parameters(&mut self, mut p: ToneParameters) {
         p.sanitize();
         let tilt = (p.tone - 0.5) * 12.0;
@@ -165,7 +176,7 @@ impl Processor {
     }
 }
 
-fn peak_protect(x: f32) -> f32 {
+pub fn peak_protect(x: f32) -> f32 {
     if !x.is_finite() {
         return 0.0;
     }

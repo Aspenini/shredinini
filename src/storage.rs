@@ -15,6 +15,12 @@ pub struct Session {
     pub parameters: ToneParameters,
     pub current_preset: String,
     pub user_presets: Vec<Preset>,
+    pub media: crate::media::Settings,
+    pub library: Vec<crate::media::LibraryEntry>,
+    pub backing_path: Option<PathBuf>,
+    pub sample_path: Option<PathBuf>,
+    pub soundfont_path: Option<PathBuf>,
+    pub favorites: Vec<crate::model::SynthSound>,
 }
 impl Default for Session {
     fn default() -> Self {
@@ -24,6 +30,12 @@ impl Default for Session {
             parameters: ToneParameters::default(),
             current_preset: "Crystal Clean".into(),
             user_presets: Vec::new(),
+            media: Default::default(),
+            library: Vec::new(),
+            backing_path: None,
+            sample_path: None,
+            soundfont_path: None,
+            favorites: Vec::new(),
         }
     }
 }
@@ -40,6 +52,7 @@ fn decode(text: &str) -> Result<Session> {
         bail!("Unsupported settings version {}", session.version);
     }
     session.parameters.sanitize();
+    session.media.sanitize();
     for p in &mut session.user_presets {
         p.parameters.sanitize();
     }
@@ -151,7 +164,22 @@ mod tests {
         session.audio.source = InstrumentSource::GuitarAndMidi;
         session.audio.midi_port = "mpk-mini-port".into();
         session.audio.synth_sound = SynthSound::SoftPad;
+        session.media.sample_root = 48;
+        session.media.sample_loop = true;
+        session.sample_path = Some(PathBuf::from("my-sound.wav"));
+        session.backing_path = Some(PathBuf::from("my-track.mp3"));
+        session.favorites.push(SynthSound::GrandPiano);
+        session.library.push(crate::media::LibraryEntry {
+            path: session.sample_path.clone().unwrap(),
+            role: crate::media::Role::Sample,
+        });
         let restored = decode(&serde_json::to_string(&session).unwrap()).unwrap();
         assert_eq!(restored.audio, session.audio);
+        assert_eq!(restored.media.sample_root, 48);
+        assert!(restored.media.sample_loop);
+        assert_eq!(restored.sample_path, session.sample_path);
+        assert_eq!(restored.backing_path, session.backing_path);
+        assert_eq!(restored.favorites, session.favorites);
+        assert_eq!(restored.library[0].path, session.library[0].path);
     }
 }

@@ -4,6 +4,7 @@
 mod allocation_probe;
 mod audio;
 mod dsp;
+mod media;
 mod midi;
 mod model;
 mod storage;
@@ -33,8 +34,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Shredini")
-            .with_inner_size([920.0, 860.0])
-            .with_min_inner_size([700.0, 620.0]),
+            .with_inner_size([1200.0, 900.0])
+            .with_min_inner_size([1024.0, 740.0]),
         ..Default::default()
     };
     eframe::run_native(

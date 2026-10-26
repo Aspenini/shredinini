@@ -128,7 +128,7 @@ impl Default for AudioConfig {
         Self {
             source: InstrumentSource::Guitar,
             midi_port: String::new(),
-            synth_sound: SynthSound::ElectricKeys,
+            synth_sound: SynthSound::GrandPiano,
             backend: Backend::Asio,
             input_id: String::new(),
             output_id: String::new(),
@@ -144,6 +144,7 @@ pub enum InstrumentSource {
     Guitar,
     MidiKeyboard,
     GuitarAndMidi,
+    Playback,
 }
 impl InstrumentSource {
     pub fn label(self) -> &'static str {
@@ -151,13 +152,14 @@ impl InstrumentSource {
             Self::Guitar => "Guitar / audio",
             Self::MidiKeyboard => "MIDI keyboard",
             Self::GuitarAndMidi => "Guitar + MIDI",
+            Self::Playback => "Audio files",
         }
     }
     pub fn has_audio(self) -> bool {
-        self != Self::MidiKeyboard
+        matches!(self, Self::Guitar | Self::GuitarAndMidi)
     }
     pub fn has_midi(self) -> bool {
-        self != Self::Guitar
+        matches!(self, Self::MidiKeyboard | Self::GuitarAndMidi)
     }
 }
 
@@ -167,6 +169,15 @@ pub enum SynthSound {
     ElectricKeys,
     SoftPad,
     Bass,
+    GrandPiano,
+    Rhodes,
+    AcousticGuitar,
+    CleanGuitar,
+    FingerBass,
+    Strings,
+    Flute,
+    Drums,
+    UserSample,
 }
 impl SynthSound {
     pub fn label(self) -> &'static str {
@@ -174,6 +185,15 @@ impl SynthSound {
             Self::ElectricKeys => "Electric Keys",
             Self::SoftPad => "Soft Pad",
             Self::Bass => "Round Bass",
+            Self::GrandPiano => "Studio Grand",
+            Self::Rhodes => "Velvet Rhodes",
+            Self::AcousticGuitar => "Steel Strings",
+            Self::CleanGuitar => "Clean Electric",
+            Self::FingerBass => "Finger Bass",
+            Self::Strings => "Chamber Strings",
+            Self::Flute => "Concert Flute",
+            Self::Drums => "Studio Drums",
+            Self::UserSample => "Your Sample",
         }
     }
     pub fn index(self) -> u32 {
@@ -181,13 +201,87 @@ impl SynthSound {
             Self::ElectricKeys => 0,
             Self::SoftPad => 1,
             Self::Bass => 2,
+            Self::GrandPiano => 3,
+            Self::Rhodes => 4,
+            Self::AcousticGuitar => 5,
+            Self::CleanGuitar => 6,
+            Self::FingerBass => 7,
+            Self::Strings => 8,
+            Self::Flute => 9,
+            Self::Drums => 10,
+            Self::UserSample => 11,
         }
     }
     pub fn from_index(i: u32) -> Self {
         match i {
             1 => Self::SoftPad,
             2 => Self::Bass,
+            3 => Self::GrandPiano,
+            4 => Self::Rhodes,
+            5 => Self::AcousticGuitar,
+            6 => Self::CleanGuitar,
+            7 => Self::FingerBass,
+            8 => Self::Strings,
+            9 => Self::Flute,
+            10 => Self::Drums,
+            11 => Self::UserSample,
             _ => Self::ElectricKeys,
+        }
+    }
+    pub const ALL: [Self; 12] = [
+        Self::GrandPiano,
+        Self::Rhodes,
+        Self::AcousticGuitar,
+        Self::CleanGuitar,
+        Self::FingerBass,
+        Self::Strings,
+        Self::Flute,
+        Self::Drums,
+        Self::ElectricKeys,
+        Self::SoftPad,
+        Self::Bass,
+        Self::UserSample,
+    ];
+    pub fn program(self) -> Option<i32> {
+        match self {
+            Self::GrandPiano => Some(0),
+            Self::Rhodes => Some(4),
+            Self::AcousticGuitar => Some(25),
+            Self::CleanGuitar => Some(27),
+            Self::FingerBass => Some(33),
+            Self::Strings => Some(48),
+            Self::Flute => Some(73),
+            Self::Drums => Some(0),
+            _ => None,
+        }
+    }
+    pub fn category(self) -> &'static str {
+        match self {
+            Self::GrandPiano | Self::Rhodes | Self::ElectricKeys => "Keys",
+            Self::AcousticGuitar | Self::CleanGuitar => "Guitars",
+            Self::FingerBass | Self::Bass => "Bass",
+            Self::Strings | Self::Flute => "Orchestral",
+            Self::Drums => "Drums",
+            Self::SoftPad => "Synth",
+            Self::UserSample => "Sampler",
+        }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::GrandPiano => "A sampled acoustic piano. Clear, expressive, and ready to play.",
+            Self::Rhodes => "Soft electric piano with bell-like detail and a warm body.",
+            Self::AcousticGuitar => "Natural picked steel strings with a bright, intimate sound.",
+            Self::CleanGuitar => "A sampled clean electric guitar for melodic lines and chords.",
+            Self::FingerBass => "A rounded fingerstyle electric bass with a focused low end.",
+            Self::Strings => "A sampled string ensemble for warm chords and cinematic layers.",
+            Self::Flute => "A breathy concert flute with a natural acoustic character.",
+            Self::Drums => "General MIDI drums. Pads and keys trigger the selected kit.",
+            Self::UserSample => {
+                "Turn an audio file into an instrument. Set its root note and play."
+            }
+            Self::SoftPad => "An airy, gentle synthesizer pad with a slow bloom.",
+            Self::Bass => "A pure, rounded synth bass with subtle harmonics.",
+            Self::ElectricKeys => "Our original FM keys. Bright, responsive, and lightweight.",
         }
     }
 }

@@ -5,7 +5,7 @@ software verification from checks that require the TONEX ONE hardware.
 
 ## Automated checks
 
-`cargo test --release --locked`: **15 passed, 0 failed**, completed in 1.47 s
+`cargo test --release --locked`: **21 passed, 0 failed**, completed in 1.52 s
 on the final build with the statically linked Windows C runtime.
 Formatting and Clippy (`--all-targets --all-features -- -D warnings`) passed.
 The filesystem's incremental-cache hard-link warning does not affect compilation.
@@ -41,6 +41,62 @@ Observed drift simulations (90 seconds each, 512-frame queue target):
 | 48 → 44.1 kHz | −400 ppm | 354–559 frames | +416.1 ppm | 0 |
 
 ## Desktop checks
+
+### Windows development build fix (October 25, 2026)
+
+- Identified the cause from the build log: default ASIO compilation inherited an
+  ESP32 `LIBCLANG_PATH`, selected the wrong SDK platform branch and failed the
+  64-bit binding layout check. No global compiler settings were changed.
+- Default Cargo features now omit ASIO. `cargo run --locked -- --list-midi`
+  compiled and exited successfully in the original shell environment, with no
+  compiler setup script or SDK/Clang override. It reported no connected MIDI input.
+- `environment.ps1 -Asio` selected desktop LLVM and the Windows x64 target;
+  `cargo check --locked --features asio` passed with ASIO enabled. The release
+  script explicitly enables ASIO unless `-NoAsio` is requested.
+- The default-feature release test suite passed all 21 tests (1.49 s), and Clippy
+  with all targets/features passed. Both PowerShell scripts parsed successfully;
+  the non-ASIO environment setup preserves the inherited Clang configuration.
+
+### Instrument studio (Shredini 0.3.0, October 25, 2026)
+
+- New automated coverage decodes synthetic WAV, MP3, FLAC and Ogg/Vorbis,
+  checks rate/duration/finite PCM and mono duplication, and rejects malformed
+  audio and SoundFonts. The embedded bank renders all eight sampled programs
+  without callback allocations, including program changes.
+- The user sampler verifies octave pitch, trim boundaries, held looping, note
+  release and allocation-free rendering. Backing tests cover pause, seek, looping
+  and rate conversion without allocations. Large replaced resources survive
+  until the control thread drains the retirement ring. Media paths, sample
+  settings, library and pinned sounds round-trip with existing sessions.
+- Launched the redesigned native interface and visually checked its sound
+  library, file library, tone controls and fixed master/transport bar. The final
+  layout puts tone and backing playback on Studio, with a separate Sound library;
+  that final layout adjustment awaits a second visual inspection.
+- Imported a generated five-second stereo WAV through the native picker; its
+  library entry, duration and waveform appeared. Started without capture or MIDI
+  hardware using Audio files and the saved **Headphones (Arctis Nova 7P)** output.
+  Observed end-of-file stop and repeated looping with output meter activity.
+- Accepted WASAPI format: **48,000 Hz, stereo F32, 480 frames**, despite the
+  128-frame request. The short playback check showed zero underruns, dropped
+  input frames, driver xruns and resyncs. This is not a 30-minute soak or a latency
+  measurement, and the user has not confirmed listening to this new build.
+- Built a portable 0.3.0 package with its embedded bank and bank/ASIO licenses.
+  Computer use was stopped with physical Escape before final packaged UI checks.
+  Native sample editing, live custom-SF2 replacement, drag/drop, no-keyboard
+  audition and minimum-size layout still need hands-on verification. No new
+  physical keyboard performance check is claimed.
+
+### Generic USB guitar input support (Shredini 0.2.2)
+
+- The guitar engine enumerates generic Windows input devices and accepts a
+  selected mono channel; it has no TONEX-specific device or sample-rate gate.
+- Input-only cables use WASAPI capture plus an independently selected stereo
+  output, with the existing tested sample-rate conversion and drift correction.
+- Setup guidance now starts with USB guitar cables and generic interfaces;
+  TONEX-specific instructions are optional. No IK driver is required for WASAPI.
+- A physical USB guitar cable was not available for this update. Electrical
+  input quality, actual driver compatibility and measured cable latency remain
+  unvalidated for individual models.
 
 ### MIDI hardware check (Shredini 0.2.0)
 

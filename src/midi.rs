@@ -1,5 +1,5 @@
 //! USB MIDI input and an allocation-free, sixteen-voice instrument.
-use crate::model::SynthSound;
+use crate::{media, model::SynthSound};
 use anyhow::{Context, Result, bail};
 use midir::{Ignore, MidiInput, MidiInputConnection};
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
@@ -143,6 +143,7 @@ struct Voice {
     level: f32,
     velocity: f32,
     attacking: bool,
+    sample_position: f64,
 }
 impl Default for Voice {
     fn default() -> Self {
@@ -158,11 +159,15 @@ impl Default for Voice {
             level: 0.0,
             velocity: 0.0,
             attacking: true,
+            sample_position: 0.0,
         }
     }
 }
 
 pub struct Instrument {
+    pub font: Option<Box<media::FontPlayer>>,
+    pub sample: Option<Arc<media::Clip>>,
+    pub media: Arc<media::State>,
     queue: HeapCons<Message>,
     pub state: Arc<State>,
     voices: [Voice; 16],
@@ -183,12 +188,15 @@ pub struct Instrument {
     last_panic: u64,
     last_audition: u64,
     preview_remaining: u32,
-    preview_phase: f32,
+    preview_note: u8,
 }
 impl Instrument {
     pub fn new(queue: HeapCons<Message>, state: Arc<State>, rate: u32) -> Self {
         let last_audition = state.audition.load(Relaxed);
         let mut result = Self {
+            font: None,
+            sample: None,
+            media: Arc::new(media::State::default()),
             queue,
             state,
             voices: [Voice::default(); 16],
@@ -211,7 +219,7 @@ impl Instrument {
             last_panic: 0,
             last_audition,
             preview_remaining: 0,
-            preview_phase: 0.0,
+            preview_note: 60,
         };
         result.select_sound(SynthSound::from_index(result.state.sound.load(Relaxed)));
         result
@@ -222,13 +230,27 @@ impl Instrument {
             SynthSound::ElectricKeys => (0.004, 1.4, 0.24, 0.20),
             SynthSound::SoftPad => (0.12, 0.9, 0.75, 0.70),
             SynthSound::Bass => (0.006, 0.35, 0.14, 0.55),
+            SynthSound::UserSample => (0.003, 0.5, 0.08, 1.0),
+            _ => (0.004, 1.4, 0.24, 0.2),
         };
         self.attack = 1.0 / (attack * self.rate);
         self.decay = (-1.0 / (decay * self.rate)).exp();
         self.release = (-1.0 / (release * self.rate)).exp();
         self.sustain_level = sustain;
+        self.refresh_font();
+    }
+    pub fn refresh_font(&mut self) {
+        if let Some(font) = &mut self.font {
+            font.select(self.sound);
+        }
+    }
+    pub fn reset_notes(&mut self) {
+        self.silence();
     }
     fn silence(&mut self) {
+        if let Some(font) = &mut self.font {
+            font.synth.note_off_all(true);
+        }
         self.preview_remaining = 0;
         self.voices.fill(Voice::default());
         self.sustain.fill(false);
@@ -250,7 +272,14 @@ impl Instrument {
         if audition != self.last_audition {
             self.last_audition = audition;
             self.preview_remaining = (self.rate * 0.4) as u32;
-            self.preview_phase = 0.0;
+            self.preview_note = if self.sound == SynthSound::Drums {
+                36
+            } else if self.sound == SynthSound::UserSample {
+                self.media.root.load(Relaxed).min(127) as u8
+            } else {
+                60
+            };
+            self.handle(Message::On(15, self.preview_note, 100));
         }
         for _ in 0..QUEUE_CAPACITY {
             let Some(message) = self.queue.try_pop() else {
@@ -260,6 +289,31 @@ impl Instrument {
         }
     }
     fn handle(&mut self, message: Message) {
+        if self.sound.program().is_some()
+            && let Some(font) = &mut self.font
+        {
+            let channel = |c: u8| {
+                if self.sound == SynthSound::Drums {
+                    9
+                } else {
+                    c as i32
+                }
+            };
+            match message {
+                Message::On(c, n, v) => font.synth.note_on(channel(c), n as i32, v as i32),
+                Message::Off(c, n) => font.synth.note_off(channel(c), n as i32),
+                Message::Control(c, n, v) => {
+                    font.synth
+                        .process_midi_message(channel(c), 0xb0, n as i32, v as i32)
+                }
+                Message::Bend(c, v) => font.synth.process_midi_message(
+                    channel(c),
+                    0xe0,
+                    (v & 127) as i32,
+                    (v >> 7) as i32,
+                ),
+            }
+        }
         match message {
             Message::On(channel, note, velocity) => {
                 self.clock = self.clock.wrapping_add(1);
@@ -286,6 +340,10 @@ impl Instrument {
                     level: 0.0,
                     velocity: velocity as f32 / 127.0,
                     attacking: true,
+                    sample_position: self.sample.as_ref().map_or(0.0, |clip| {
+                        f32::from_bits(self.media.sample_start.load(Relaxed)) as f64
+                            * clip.frames.len() as f64
+                    }),
                 };
             }
             Message::Off(channel, note) => {
@@ -349,20 +407,20 @@ impl Instrument {
         }
     }
     pub fn tick(&mut self) -> f32 {
+        if self.preview_remaining > 0 {
+            self.preview_remaining -= 1;
+            if self.preview_remaining == 0 {
+                self.handle(Message::Off(15, self.preview_note));
+            }
+        }
         let tau = std::f32::consts::TAU;
         let vibrato = (self.lfo * tau).sin();
         self.lfo = (self.lfo + 5.0 / self.rate).fract();
-        let mut sum = 0.0;
-        if self.preview_remaining > 0 {
-            let remaining = self.preview_remaining as f32;
-            let elapsed = self.rate * 0.4 - remaining;
-            let envelope = (elapsed / (self.rate * 0.005))
-                .min(remaining / (self.rate * 0.05))
-                .clamp(0.0, 1.0);
-            self.preview_phase = (self.preview_phase + 261.625_55 / self.rate).fract();
-            sum = 0.13 * (self.preview_phase * tau).sin() * envelope;
-            self.preview_remaining -= 1;
-        }
+        let mut sum = if self.sound.program().is_some() {
+            self.font.as_mut().map_or(0.0, |f| f.tick())
+        } else {
+            0.0
+        };
         for v in &mut self.voices {
             if !v.active {
                 continue;
@@ -386,6 +444,41 @@ impl Instrument {
             let step = v.step * self.bend[c] * (1.0 + vibrato * self.modulation[c] * 0.009);
             v.phase = (v.phase + step).fract();
             let p = v.phase * tau;
+            if self.sound.program().is_some() {
+                continue;
+            }
+            if self.sound == SynthSound::UserSample {
+                if let Some(clip) = &self.sample {
+                    let start = f32::from_bits(self.media.sample_start.load(Relaxed)) as f64
+                        * clip.frames.len() as f64;
+                    let end = (f32::from_bits(self.media.sample_end.load(Relaxed)) as f64
+                        * clip.frames.len() as f64)
+                        .max(start + 1.0);
+                    if v.sample_position >= end {
+                        if self.media.sample_loop.load(Relaxed) && (v.held || v.sustained) {
+                            v.sample_position = start;
+                        } else {
+                            v.active = false;
+                            continue;
+                        }
+                    }
+                    let frame = clip.at(v.sample_position);
+                    let gain = (0.65 / clip.peak.max(0.01)).min(16.0);
+                    sum += (frame[0] + frame[1])
+                        * 0.5
+                        * gain
+                        * v.level
+                        * v.velocity.sqrt()
+                        * self.volume[c]
+                        * self.expression[c];
+                    let root = self.media.root.load(Relaxed).min(127) as usize;
+                    v.sample_position += (v.step / self.rates[root] * clip.rate as f32 / self.rate
+                        * self.bend[c]) as f64;
+                } else {
+                    v.active = false;
+                }
+                continue;
+            }
             let wave = match self.sound {
                 SynthSound::ElectricKeys => {
                     let index = (1.0 - step * 8.0).max(0.0) * 0.9 * v.level * v.velocity;
@@ -414,6 +507,7 @@ impl Instrument {
                         })
                         * 0.84
                 }
+                _ => 0.0,
             };
             sum += wave * v.level * v.velocity.sqrt() * 0.13 * self.volume[c] * self.expression[c];
         }
@@ -485,6 +579,40 @@ mod tests {
         assert_eq!(decode(&[0x90, 60]), None);
         assert_eq!(decode(&[0xf8]), None);
         assert_eq!(decode(&[0x90, 200, 1]), None);
+    }
+    #[test]
+    fn user_sample_pitch_trim_loop_and_release() {
+        let (_, mut instrument) = setup();
+        instrument.state.set_sound(SynthSound::UserSample);
+        instrument.sample = Some(Arc::new(media::Clip {
+            frames: vec![[0.2; 2]; 4800],
+            rate: 48000,
+            peak: 0.2,
+        }));
+        instrument.media.publish(&media::Settings {
+            sample_start: 0.25,
+            sample_end: 0.75,
+            sample_loop: true,
+            ..Default::default()
+        });
+        instrument.begin_block();
+        instrument.handle(Message::On(0, 72, 100));
+        assert_eq!(instrument.voices[0].sample_position, 1200.0);
+        instrument.tick();
+        assert!((instrument.voices[0].sample_position - 1202.0).abs() < 0.01);
+        let count = crate::allocation_probe::count(|| {
+            for _ in 0..48000 {
+                assert!(instrument.tick().is_finite());
+            }
+            assert!(instrument.voices[0].active);
+            assert!(instrument.voices[0].sample_position < 3602.0);
+            instrument.handle(Message::Off(0, 72));
+            for _ in 0..48000 {
+                instrument.tick();
+            }
+        });
+        assert_eq!(count, 0);
+        assert!(!instrument.voices[0].active);
     }
     #[test]
     fn voices_velocity_sustain_channels_and_panic() {
@@ -575,6 +703,9 @@ mod tests {
             synth.begin_block();
             for _ in 0..24000 {
                 energy += synth.tick().abs();
+            }
+            for _ in 0..48000 * 4 {
+                synth.tick();
             }
             for _ in 0..100 {
                 assert_eq!(synth.tick(), 0.0);

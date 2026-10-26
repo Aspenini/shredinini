@@ -2,7 +2,7 @@
 //! preallocated audio state, an SPSC ring, and lock-free scalar atomics.
 use crate::{
     dsp::Processor,
-    midi,
+    media, midi,
     model::{AudioConfig, Backend, InstrumentSource, SharedParameters},
 };
 use anyhow::{Context, Result, bail};
@@ -88,12 +88,15 @@ fn peak(a: &AtomicU32, value: f32) {
 }
 
 pub enum Command {
+    InstallAudio(media::Role, Arc<media::Clip>),
+    InstallFont(Arc<rustysynth::SoundFont>),
     Refresh,
     Start(AudioConfig),
     Stop,
     Shutdown,
 }
 pub enum Event {
+    Notice(String),
     Devices(Vec<DeviceInfo>, String),
     MidiDevices(Vec<midi::Port>, String),
     Running(RunningInfo),
@@ -115,6 +118,7 @@ pub struct RunningInfo {
 }
 
 pub struct Engine {
+    pub media: Arc<media::State>,
     pub commands: SyncSender<Command>,
     pub events: Receiver<Event>,
     pub diagnostics: Arc<Diagnostics>,
@@ -129,6 +133,8 @@ impl Engine {
         let d = diagnostics.clone();
         let midi = Arc::new(midi::State::default());
         let m = midi.clone();
+        let media = Arc::new(media::State::default());
+        let shared_media = media.clone();
         let handle=thread::Builder::new().name("audio-control".into()).spawn(move || {
             let mut streams:Option<ActiveStreams>=None;
             let mut last_counts=(0,0);
@@ -137,8 +143,28 @@ impl Engine {
             let (devices,note)=enumerate_devices();
             let _=tx.send(Event::Devices(devices,note));
             let (ports,note)=midi::enumerate();let _=tx.send(Event::MidiDevices(ports,note));
+            let mut context=PlaybackContext {resources:media::Resources {font:media::default_font().ok(),..Default::default()},shared:shared_media};
             loop {
                 match rx.recv_timeout(Duration::from_millis(25)) {
+                    Ok(Command::InstallAudio(role,clip))=>{
+                        let update=match role {media::Role::Sample=>media::Update::Sample(Some(clip.clone())),_=>media::Update::Backing(Some(clip.clone()))};
+                        let accepted=streams.as_mut().is_none_or(|s|s.ports.updates.try_push(update).is_ok());
+                        if accepted {
+                            match role {media::Role::Sample=>context.resources.sample=Some(clip),_=>{
+                                context.shared.stop();context.shared.length.store(clip.frames.len() as u64,Relaxed);context.resources.backing=Some(clip);
+                            }}
+                        }else{let _=tx.send(Event::Notice("Audio update queue is busy. Load the file again.".into()));}
+                    }
+                    Ok(Command::InstallFont(font))=>{
+                        let prepared=if let Some(s)=streams.as_ref() {media::FontPlayer::new(&font,s.rate).map(|f|Some(media::Update::Font(Some(f))))}else{Ok(None)};
+                        match prepared {
+                            Ok(update)=>{
+                                let accepted=match (streams.as_mut(),update) {(Some(s),Some(update))=>s.ports.updates.try_push(update).is_ok(),_=>true};
+                                if accepted {context.resources.font=Some(font);}else{let _=tx.send(Event::Notice("Instrument update queue is busy. Try loading the bank again.".into()));}
+                            }
+                            Err(e)=>{let _=tx.send(Event::Notice(format!("Instrument bank could not be applied: {e}")));}
+                        }
+                    }
                     Ok(Command::Shutdown)|Err(mpsc::RecvTimeoutError::Disconnected)=>break,
                     Ok(Command::Refresh)=>{
                         if streams.is_none() {
@@ -146,10 +172,10 @@ impl Engine {
                             let (ports,note)=midi::enumerate();let _=tx.send(Event::MidiDevices(ports,note));
                         }
                     }
-                    Ok(Command::Stop)=>{streams=None;m.clear_activity();let _=tx.send(Event::Stopped);}
+                    Ok(Command::Stop)=>{streams=None;m.clear_activity();context.shared.playing.store(false,Relaxed);let _=tx.send(Event::Stopped);}
                     Ok(Command::Start(config))=>{
                         streams=None; d.reset();m.clear_activity();m.messages.store(0,Relaxed);m.dropped.store(0,Relaxed);m.set_sound(config.synth_sound);
-                        match open_streams(&config,parameters.clone(),d.clone(),m.clone()) {
+                        match open_streams(&config,parameters.clone(),d.clone(),m.clone(),&context) {
                             Ok((active,info))=>{
                                 streams=Some(active); last_counts=(0,0);last_activity=Instant::now();last_midi_check=Instant::now();
                                 let _=tx.send(Event::Running(info));
@@ -159,7 +185,8 @@ impl Engine {
                     }
                     Err(mpsc::RecvTimeoutError::Timeout)=>{}
                 }
-                if let Some(active)=streams.as_ref() {
+                if let Some(active)=streams.as_mut() {
+                    while let Some(retired)=active.ports.retired.try_pop(){drop(retired);}
                     let counts=(d.input_frames.load(Relaxed),d.output_frames.load(Relaxed));
                     if (active.input.is_none() || counts.0!=last_counts.0) && counts.1!=last_counts.1 {
                         last_activity=Instant::now();last_counts=counts;
@@ -170,7 +197,7 @@ impl Engine {
                             if !ports.iter().any(|p|p.id==*id) {d.fatal.store(true,Relaxed);}
                     }
                     if d.fatal.load(Relaxed) || last_activity.elapsed()>Duration::from_secs(3) {
-                        d.fatal.store(true,Relaxed); streams=None;m.clear_activity();
+                        d.fatal.store(true,Relaxed); streams=None;m.clear_activity();context.shared.playing.store(false,Relaxed);
                         let _=tx.send(Event::Failed("Audio or MIDI device stopped or changed. Check its connection and driver, then use Reconnect. The selected output has not been changed.".into()));
                     }
                 }
@@ -182,6 +209,7 @@ impl Engine {
             events,
             diagnostics,
             midi,
+            media,
             thread: Some(handle),
         }
     }
@@ -191,10 +219,17 @@ impl Engine {
 }
 
 struct ActiveStreams {
+    ports: media::ControlPorts,
+    rate: u32,
     input: Option<Stream>,
     _output: Stream,
     _midi: Option<midir::MidiInputConnection<()>>,
     midi_port: Option<String>,
+}
+#[derive(Clone)]
+struct PlaybackContext {
+    resources: media::Resources,
+    shared: Arc<media::State>,
 }
 impl Drop for Engine {
     fn drop(&mut self) {
@@ -259,7 +294,7 @@ pub fn enumerate_devices() -> (Vec<DeviceInfo>, String) {
     }
     if !result.iter().any(|d| d.backend == Backend::Asio) {
         notes.push(
-            "No ASIO device found. Install the IK driver for TONEX ONE, or select WASAPI.".into(),
+            "No ASIO device found. Use WASAPI for a USB guitar cable or computer audio, or install your interface manufacturer's ASIO driver if available.".into(),
         );
     }
     (result, notes.join("\n"))
@@ -363,9 +398,10 @@ fn open_streams(
     parameters: Arc<SharedParameters>,
     d: Arc<Diagnostics>,
     midi_state: Arc<midi::State>,
+    context: &PlaybackContext,
 ) -> Result<(ActiveStreams, RunningInfo)> {
     if !config.source.has_audio() {
-        return open_keyboard(config, parameters, d, midi_state);
+        return open_keyboard(config, parameters, d, midi_state, context);
     }
     let h = host(config.backend)?;
     if config.backend == Backend::Asio && config.input_id != config.output_id {
@@ -412,8 +448,15 @@ fn open_streams(
             parameters.clone(),
             d.clone(),
             midi_state.clone(),
+            context,
         ) {
-            Ok((i, o, resampling, connection)) => {
+            Ok(PreparedPair {
+                input: i,
+                output: o,
+                resampling,
+                connection,
+                ports,
+            }) => {
                 let info = RunningInfo {
                     source: config.source,
                     input_rate: is.sample_rate,
@@ -431,6 +474,8 @@ fn open_streams(
                 o.play().context("Start playback")?;
                 return Ok((
                     ActiveStreams {
+                        ports,
+                        rate: os.sample_rate,
                         input: Some(i),
                         _output: o,
                         _midi: connection,
@@ -459,7 +504,8 @@ fn prepare_pair(
     parameters: Arc<SharedParameters>,
     d: Arc<Diagnostics>,
     midi_state: Arc<midi::State>,
-) -> Result<(Stream, Stream, bool, Option<midir::MidiInputConnection<()>>)> {
+    context: &PlaybackContext,
+) -> Result<PreparedPair> {
     let (producer, consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
     let resampling = config.backend == Backend::Wasapi;
     let requested = match ic.buffer_size {
@@ -487,6 +533,7 @@ fn prepare_pair(
     } else {
         None
     };
+    let ports = monitor.prepare_assets(context)?;
     macro_rules! capture {
         ($t:ty) => {
             build_capture::<$t>(input, ic.clone(), config.input_channel, producer, d.clone())?
@@ -507,7 +554,20 @@ fn prepare_pair(
         _ => bail!("Unsupported capture sample format"),
     };
     let o = open_playback(output, oc, ofmt, monitor, d)?;
-    Ok((i, o, resampling, connection))
+    Ok(PreparedPair {
+        input: i,
+        output: o,
+        resampling,
+        connection,
+        ports,
+    })
+}
+struct PreparedPair {
+    input: Stream,
+    output: Stream,
+    resampling: bool,
+    connection: Option<midir::MidiInputConnection<()>>,
+    ports: media::ControlPorts,
 }
 
 fn open_playback(
@@ -555,6 +615,7 @@ fn open_keyboard(
     parameters: Arc<SharedParameters>,
     d: Arc<Diagnostics>,
     state: Arc<midi::State>,
+    context: &PlaybackContext,
 ) -> Result<(ActiveStreams, RunningInfo)> {
     let h = host(config.backend)?;
     let output = h
@@ -583,7 +644,23 @@ fn open_keyboard(
             d.clone(),
         )?;
         monitor.audio_enabled = false;
-        let connection = attach_keyboard(&mut monitor, config, state.clone())?;
+        monitor
+            .processor
+            .use_full_instrument_range(stream_config.sample_rate);
+        let connection = if config.source.has_midi() && config.midi_port.is_empty() {
+            let (_, consumer) = HeapRb::<midi::Message>::new(midi::QUEUE_CAPACITY).split();
+            monitor.instrument = Some(midi::Instrument::new(
+                consumer,
+                state.clone(),
+                monitor.output_rate,
+            ));
+            None
+        } else if config.source.has_midi() {
+            Some(attach_keyboard(&mut monitor, config, state.clone())?)
+        } else {
+            None
+        };
+        let ports = monitor.prepare_assets(context)?;
         match open_playback(
             &output,
             &stream_config,
@@ -607,10 +684,13 @@ fn open_keyboard(
                 output.play().context("Start keyboard audio")?;
                 return Ok((
                     ActiveStreams {
+                        ports,
+                        rate: stream_config.sample_rate,
                         input: None,
                         _output: output,
-                        _midi: Some(connection),
-                        midi_port: Some(config.midi_port.clone()),
+                        _midi: connection,
+                        midi_port: (config.source.has_midi() && !config.midi_port.is_empty())
+                            .then(|| config.midi_port.clone()),
                     },
                     info,
                 ));
@@ -722,6 +802,7 @@ impl DriftController {
 }
 
 pub struct Monitor {
+    media: media::Runtime,
     instrument: Option<midi::Instrument>,
     audio_enabled: bool,
     consumer: HeapCons<f32>,
@@ -770,6 +851,7 @@ impl Monitor {
         let filter_delay = resampler.as_ref().map_or(0, |r| r.output_delay());
         let p = parameters.read();
         Ok(Self {
+            media: media::Runtime::new(Arc::new(media::State::default()), None).0,
             instrument: None,
             audio_enabled: true,
             consumer,
@@ -792,6 +874,20 @@ impl Monitor {
             bypass_target: if p.bypass { 1.0 } else { 0.0 },
             last_overruns: 0,
         })
+    }
+    fn prepare_assets(&mut self, context: &PlaybackContext) -> Result<media::ControlPorts> {
+        let (runtime, ports) =
+            media::Runtime::new(context.shared.clone(), context.resources.backing.clone());
+        self.media = runtime;
+        if let Some(instrument) = &mut self.instrument {
+            instrument.media = context.shared.clone();
+            instrument.sample = context.resources.sample.clone();
+            if let Some(font) = &context.resources.font {
+                instrument.font = Some(media::FontPlayer::new(font, self.output_rate)?);
+                instrument.refresh_font();
+            }
+        }
+        Ok(ports)
     }
     fn refill(&mut self) -> bool {
         let mut need = self
@@ -869,6 +965,7 @@ impl Monitor {
         self.available > 0
     }
     fn render<T: Sample + FromSample<f32>>(&mut self, output: &mut [T], channels: usize) {
+        self.media.begin_block(&mut self.instrument);
         let p = self.parameters.read();
         self.processor.set_parameters(p);
         self.bypass_target = if p.bypass { 1.0 } else { 0.0 };
@@ -884,7 +981,7 @@ impl Monitor {
             if capture_available && self.position >= self.available && !self.refill() {
                 capture_available = false;
             }
-            if self.d.fatal.load(Relaxed) || (!capture_available && self.instrument.is_none()) {
+            if self.d.fatal.load(Relaxed) {
                 // Startup prefill is intentional silence, not a dropout.
                 output[index * channels..].fill(T::EQUILIBRIUM);
                 break;
@@ -901,10 +998,11 @@ impl Monitor {
             self.bypass +=
                 (self.bypass_target - self.bypass) * (1.0 / (0.020 * self.output_rate as f32));
             let stereo = self.processor.tick(mono, self.bypass);
+            let backing = self.media.tick(self.output_rate, p.output_db);
             self.fade = (self.fade + 1.0 / (0.005 * self.output_rate as f32)).min(1.0);
             frame.fill(T::EQUILIBRIUM);
             for i in 0..2 {
-                let x = stereo[i] * self.fade;
+                let x = crate::dsp::peak_protect(stereo[i] * self.fade + backing[i]);
                 maximum = maximum.max(x.abs());
                 if x.abs() > 0.98 {
                     clips += 1;
@@ -921,6 +1019,7 @@ impl Monitor {
         if !self.audio_enabled {
             peak(&self.d.input_peak, source_peak);
         }
+        self.media.publish();
     }
 }
 

@@ -3,14 +3,8 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Push-Location -LiteralPath $projectRoot
 try {
-    . (Join-Path $PSScriptRoot 'environment.ps1')
+    . (Join-Path $PSScriptRoot 'environment.ps1') -Asio:(-not $NoAsio)
     if (-not $NoAsio) {
-        if (-not $env:LIBCLANG_PATH) {
-            $clangDirectory = 'C:\Program Files\LLVM\bin'
-            if (Test-Path -LiteralPath (Join-Path $clangDirectory 'libclang.dll')) {
-                $env:LIBCLANG_PATH = $clangDirectory
-            }
-        }
         if (-not $env:CPAL_ASIO_DIR) {
             # asio-sys's downloader does not quote paths containing spaces.
             # Fetch the official SDK here with PowerShell's literal path arguments.
@@ -29,7 +23,7 @@ try {
         }
     }
     $cargoArguments = @('build', '--release', '--locked')
-    if ($NoAsio) { $cargoArguments += '--no-default-features' }
+    if (-not $NoAsio) { $cargoArguments += @('--features', 'asio') }
     & cargo @cargoArguments
     if ($LASTEXITCODE -ne 0) { throw 'Rust build failed.' }
     if ($Package) {
@@ -43,6 +37,7 @@ try {
         foreach ($document in @('README.md', 'VALIDATION.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md')) {
             Copy-Item -LiteralPath (Join-Path $projectRoot $document) -Destination $packageDirectory -Force
         }
+        Copy-Item -LiteralPath (Join-Path $projectRoot 'assets\GeneralUser-GS-LICENSE.txt') -Destination $packageDirectory -Force
         if (-not $NoAsio) {
             Copy-Item -LiteralPath (Join-Path $env:CPAL_ASIO_DIR 'LICENSE.txt') -Destination (Join-Path $packageDirectory 'ASIO-SDK-LICENSE.txt') -Force
         }

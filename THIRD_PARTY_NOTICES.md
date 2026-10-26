@@ -5,8 +5,20 @@ recorded in Cargo.lock. The application uses CPAL (Apache-2.0), egui/eframe
 (MIT OR Apache-2.0), ringbuf (MIT OR Apache-2.0), Rubato (MIT), biquad (MIT),
 Serde (MIT OR Apache-2.0), and their transitive dependencies under their respective
 licenses. Dependency license texts remain available in their published sources.
-USB MIDI connectivity uses midir (MIT). The instrument oscillator/envelope code
-is part of Shredini; it contains no sampled commercial instrument recordings.
+USB MIDI connectivity uses midir (MIT). RustySynth (MIT) renders SoundFonts;
+Symphonia (MPL-2.0) decodes audio files; rfd (MIT) provides native file dialogs.
+The original oscillator/envelope and single-sample instrument code is part of
+Shredini.
+
+The embedded GeneralUser GS v2.0.3 SoundFont is by S. Christian Collins and its
+contributors, under its own License v2.0. The complete unmodified license is in
+GeneralUser-GS-LICENSE.txt in portable distributions and assets/ in the source.
+It permits use in software and private/commercial music creation. Its license
+also explains the author's uncertainty about the historical provenance of some
+samples; retain and review that statement for commercial redistribution.
+Source and pinned hash are recorded in assets/README.md. This bank is not covered
+by Shredini's MIT license. User-imported audio and SoundFonts retain their own
+rights and are referenced locally, never uploaded.
 
 ASIO is a trademark and software of Steinberg Media Technologies GmbH.
 ASIO-enabled builds include Steinberg ASIO SDK components. The SDK provides
