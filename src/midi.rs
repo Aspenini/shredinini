@@ -1,8 +1,12 @@
 //! USB MIDI input and an allocation-free, sixteen-voice instrument.
 use crate::{media, model::SynthSound};
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::{Context, Result, bail};
+#[cfg(not(target_arch = "wasm32"))]
 use midir::{Ignore, MidiInput, MidiInputConnection};
-use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
+use ringbuf::{HeapCons, traits::*};
+#[cfg(any(not(target_arch = "wasm32"), test))]
+use ringbuf::{HeapProd, HeapRb};
 use std::sync::{
     Arc,
     atomic::{AtomicU32, AtomicU64, Ordering::Relaxed},
@@ -15,6 +19,7 @@ pub struct Port {
     pub id: String,
     pub name: String,
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub fn enumerate() -> (Vec<Port>, String) {
     match MidiInput::new("Shredini MIDI discovery") {
         Ok(input) => {
@@ -93,6 +98,7 @@ impl State {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn connect(
     id: &str,
     mut producer: HeapProd<Message>,
@@ -530,6 +536,7 @@ impl Instrument {
 }
 
 /// Small diagnostics utility: enumerate or observe a keyboard without opening a microphone.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn probe(seconds: u64) -> Result<()> {
     let (ports, note) = enumerate();
     for p in &ports {

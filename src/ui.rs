@@ -60,6 +60,7 @@ pub struct Studio {
 impl Studio {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        #[cfg(target_os = "windows")]
         if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
             let mut fonts = egui::FontDefinitions::default();
             fonts
@@ -177,15 +178,15 @@ impl Studio {
                 .devices
                 .iter()
                 .find(|d| {
-                    d.backend == Backend::Wasapi && d.default_output && d.output_channels >= 2
+                    d.backend == Backend::standard() && d.default_output && d.output_channels >= 2
                 })
                 .or_else(|| {
                     self.devices
                         .iter()
-                        .find(|d| d.backend == Backend::Wasapi && d.output_channels >= 2)
+                        .find(|d| d.backend == Backend::standard() && d.output_channels >= 2)
                 })
         {
-            self.session.audio.backend = Backend::Wasapi;
+            self.session.audio.backend = Backend::standard();
             self.session.audio.output_id = output.id.clone();
         }
     }
@@ -256,7 +257,7 @@ impl Studio {
                             }
                             self.changed();
                         } else if !self.devices.iter().any(|d| d.backend == Backend::Asio) {
-                            self.session.audio.backend = Backend::Wasapi;
+                            self.session.audio.backend = Backend::standard();
                         }
                     }
                 }
@@ -340,10 +341,10 @@ impl Studio {
                 ui.heading("Connect. Set your level. Play.");
                 if self.session.audio.source.has_audio() {
                 ui.label("1. Connect your guitar using a USB guitar cable with built-in audio conversion, or any instrument audio interface. TONEX is optional.");
-                ui.label("2. For an input-only USB cable, choose WASAPI, select the cable as Guitar input, and choose your speakers or headphones as Stereo output.");
+                ui.label("2. Select the cable as Guitar input and your speakers or headphones as Stereo output. Use WASAPI on Windows, CoreAudio on macOS, or ALSA on Linux.");
                 ui.label("3. Start with guitar channel 1. Mono inputs and different input/output sample rates are supported automatically.");
                 ui.label("4. For an interface with its own headphone output and ASIO driver, ASIO can provide lower-latency monitoring through that same interface.");
-                ui.weak("A passive jack-to-USB adapter cannot digitize a guitar. The cable must appear as a Windows audio input. Device names vary by model.");
+                ui.weak("A passive jack-to-USB adapter cannot digitize a guitar. The cable must appear as an audio input in your operating system. Device names vary by model.");
                 ui.collapsing("Using TONEX ONE?",|ui|{
                     ui.label("Bypass pedal processing in Stomp mode and disable Direct Monitoring in TONEX Editor. Install IK's ASIO driver from IK Product Manager → Hardware if using ASIO.");
                     ui.hyperlink_to("IK’s TONEX ONE setup guide","https://www.ikmultimedia.com/contact-support/quickfaq.php?id=1298&quick=QUICKHW");
@@ -363,8 +364,7 @@ impl Studio {
                         });
                     }
                     egui::ComboBox::from_id_salt("backend").selected_text(self.session.audio.backend.label()).show_ui(ui,|ui|{
-                        ui.selectable_value(&mut self.session.audio.backend,Backend::Asio,Backend::Asio.label());
-                        ui.selectable_value(&mut self.session.audio.backend,Backend::Wasapi,Backend::Wasapi.label());
+                        for &backend in Backend::available() { ui.selectable_value(&mut self.session.audio.backend,backend,backend.label()); }
                     });
                     let backend=self.session.audio.backend;
                     if self.session.audio.source.has_audio() {device_picker(ui,"Guitar input",&self.devices,backend,true,&mut self.session.audio.input_id);}
@@ -413,7 +413,7 @@ impl Studio {
                     if let Some(ms)=driver_ms {ui.label(format!("Reported driver buffer duration (input + output): {ms:.1} ms"));}
                 }
                 ui.weak("App latency covers queued samples, chunk staging and the resampler. Driver buffers, USB transport and converters add latency. This is not a measured round-trip value.");
-                if d.realtime_denied.load(Relaxed) {ui.colored_label(Color32::YELLOW,"Windows denied real-time priority; audio continues at normal priority.");}
+                if d.realtime_denied.load(Relaxed) {ui.colored_label(Color32::YELLOW,"Real-time priority was unavailable; audio continues at normal priority.");}
                 ui.weak("If you hear crackles, stop monitoring and try 256 or 512 frames. A USB cable plus separate output may add more latency than an interface with its own headphone output.");
                 if let Some(path)=&self.path {ui.separator();ui.weak(format!("Settings: {}",path.display()));}
             });

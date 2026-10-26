@@ -1,15 +1,29 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 #[cfg(test)]
 mod allocation_probe;
+#[cfg(not(target_arch = "wasm32"))]
 mod audio;
-mod dsp;
-mod media;
-mod midi;
-mod model;
+#[cfg(not(target_arch = "wasm32"))]
+use shredini_core::dsp;
+#[cfg(not(target_arch = "wasm32"))]
+use shredini_core::media;
+#[cfg(not(target_arch = "wasm32"))]
+use shredini_core::midi;
+#[cfg(not(target_arch = "wasm32"))]
+use shredini_core::model;
+#[cfg(not(target_arch = "wasm32"))]
 mod storage;
+#[cfg(not(target_arch = "wasm32"))]
 mod ui;
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     if std::env::args().any(|arg| arg == "--probe-midi") {
         if let Err(e) = midi::probe(15) {

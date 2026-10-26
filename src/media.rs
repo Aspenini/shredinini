@@ -12,10 +12,10 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed},
-        mpsc,
     },
-    thread,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::{sync::mpsc, thread};
 use symphonia::core::{
     audio::SampleBuffer, codecs::DecoderOptions, errors::Error, formats::FormatOptions,
     io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
@@ -173,11 +173,24 @@ pub fn decode(path: &Path) -> Result<Arc<Clip>> {
     if file.metadata()?.len() > 512 * 1024 * 1024 {
         bail!("Audio file is too large (512 MB maximum).");
     }
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
+    decode_source(
+        Box::new(file),
+        path.extension().and_then(|e| e.to_str()).unwrap_or(""),
+    )
+}
+pub fn decode_bytes(bytes: Vec<u8>, extension: &str) -> Result<Arc<Clip>> {
+    if bytes.len() > 512 * 1024 * 1024 {
+        bail!("Audio file exceeds 512 MB.");
     }
-    let source = MediaSourceStream::new(Box::new(file), Default::default());
+    decode_source(Box::new(Cursor::new(bytes)), extension)
+}
+fn decode_source(
+    source: Box<dyn symphonia::core::io::MediaSource>,
+    extension: &str,
+) -> Result<Arc<Clip>> {
+    let mut hint = Hint::new();
+    hint.with_extension(extension);
+    let source = MediaSourceStream::new(source, Default::default());
     let mut reader = symphonia::default::get_probe()
         .format(
             &hint,
@@ -237,6 +250,7 @@ pub fn decode(path: &Path) -> Result<Arc<Clip>> {
     }
     Ok(Arc::new(Clip { frames, rate, peak }))
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub fn default_font() -> Result<Arc<SoundFont>> {
     let bytes = include_bytes!("../assets/GeneralUser-GS.sf2");
     Ok(Arc::new(
@@ -456,10 +470,18 @@ pub struct ImportResult {
     pub path: PathBuf,
     pub result: Result<Loaded>,
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Importer {
     tx: mpsc::SyncSender<(Role, Option<PathBuf>)>,
     pub results: mpsc::Receiver<ImportResult>,
 }
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for Importer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
 impl Importer {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::sync_channel::<(Role, Option<PathBuf>)>(8);

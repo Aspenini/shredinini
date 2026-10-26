@@ -100,12 +100,43 @@ pub enum Backend {
     #[default]
     Asio,
     Wasapi,
+    Platform,
 }
 impl Backend {
     pub fn label(self) -> &'static str {
         match self {
             Self::Asio => "ASIO · same interface",
             Self::Wasapi => "WASAPI · flexible routing",
+            Self::Platform => {
+                if cfg!(target_os = "macos") {
+                    "CoreAudio"
+                } else if cfg!(target_os = "linux") {
+                    "ALSA · system audio"
+                } else {
+                    "System audio"
+                }
+            }
+        }
+    }
+    pub fn standard() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::Wasapi
+        } else {
+            Self::Platform
+        }
+    }
+    pub fn available() -> &'static [Self] {
+        #[cfg(all(target_os = "windows", feature = "asio"))]
+        {
+            &[Self::Asio, Self::Wasapi]
+        }
+        #[cfg(all(target_os = "windows", not(feature = "asio")))]
+        {
+            &[Self::Wasapi]
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            &[Self::Platform]
         }
     }
 }
@@ -129,7 +160,7 @@ impl Default for AudioConfig {
             source: InstrumentSource::Guitar,
             midi_port: String::new(),
             synth_sound: SynthSound::GrandPiano,
-            backend: Backend::Asio,
+            backend: Backend::standard(),
             input_id: String::new(),
             output_id: String::new(),
             input_channel: 0,

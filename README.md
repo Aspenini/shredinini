@@ -1,16 +1,39 @@
 # Shredini
 
-A standalone Windows instrument studio written in Rust. Play guitar through an
+A cross-platform instrument studio written in Rust. Play guitar through an
 audio interface, a USB MIDI keyboard through sampled instruments or synthesizers,
 or both together. A dark studio, sound library and simple tone controls keep the
-focus on playing. No account, network connection or DAW is needed.
+focus on playing. No account or DAW is needed. Desktop builds work offline;
+the web edition runs audio locally after loading its engine and sound bank.
+
+## Platforms and getting started
+
+| Platform | Audio / MIDI | Build and verification |
+| --- | --- | --- |
+| Windows x64 | WASAPI; optional ASIO; native MIDI | Built and regression tested |
+| Linux x64 | ALSA, including configured PipeWire/PulseAudio ALSA endpoints; ALSA MIDI | Built and regression tested in Ubuntu/WSL; physical Linux audio still needs testing |
+| macOS Intel / Apple Silicon | CoreAudio; CoreMIDI | Platform port, app bundle and CI jobs added; native Mac build/hardware validation pending |
+| Web | Web Audio AudioWorklet + shared Rust/WASM; Web MIDI where available | Built and tested in a Chromium-based browser |
+
+On a desktop, launch Shredini (or run `cargo run`), select your instrument and
+output in **Audio & MIDI setup**, choose a sound and press **Start playing**.
+Monitoring never starts automatically. Device IDs are platform-specific; choose
+your devices again when moving settings to another OS.
+
+For the browser build, serve the included web directory over HTTPS or localhost,
+press **Start playing**, and try **Audition** or the on-screen keys. Computer keys
+A–K also play notes. **Connect MIDI** requests keyboard access; MIDI permission
+is not required to audition or use the on-screen keyboard. Guitar sources request
+microphone access only when you press Start. No audio or imported files are sent
+to a server. See the web build commands below.
 
 ## Your studio
 
 - **Instruments:** eight sampled sounds: Studio Grand, Velvet Rhodes, Steel
   Strings, Clean Electric, Finger Bass, Chamber Strings, Concert Flute and Studio
   Drums. Three original synth sounds remain available. Search, filter by family
-  and pin favorites. The factory GeneralUser GS bank is embedded for offline use.
+  and pin favorites. The factory bank is embedded in desktop builds and included
+  as a separate static asset in the web distribution.
 - **Backing tracks:** import WAV, MP3, FLAC or OGG/Vorbis, then play/pause, seek,
   loop and adjust track level while playing an instrument. Choose **Audio files**
   as the source for playback without a guitar or MIDI device. Tracks bypass the
@@ -26,7 +49,7 @@ focus on playing. No account, network connection or DAW is needed.
 - **Practice:** an adjustable 30–240 BPM metronome, output meter, master volume,
   sound audition and saved tone presets.
 
-Use the sidebar import buttons or drop an audio file onto the studio and choose
+On the desktop, use the sidebar import buttons or drop an audio file onto the studio and choose
 backing track or keyboard sample. **Your audio** keeps a local library, including
 the option to use the same file in either role. Imports decode on a worker before
 playback; files are not streamed from disk. Limits are 512 MB per audio file and
@@ -36,12 +59,32 @@ channels. The app stores original paths, not copies: moved/missing files show an
 import error on the next launch. Audio, samples, trim settings, favorites and
 device choices restore; playback always starts stopped.
 
+The web edition uses the same Rust decoder, sampler, instruments and effects.
+Its file limit is 256 MB and 28.8 million decoded frames per file (10 minutes at
+48 kHz). Files are copied into browser-local IndexedDB and settings into local
+storage. Storage quota failures leave an imported file usable for that visit and
+show a warning. File imports and bank replacement stop audio before allocating
+new resources. Large custom banks may exceed a browser's available memory.
+Browser data belongs to its origin: changing port/domain or clearing browser
+storage changes/removes the local library.
+
+Web MIDI, output-device selection and permissions vary by browser. The app
+detects available APIs and offers on-screen keys when hardware MIDI is absent.
+Where output selection is unavailable, use the OS's browser-default device.
+An explicitly selected device disconnect stops audio; default browser output
+follows the OS and may change when its default changes. Browser buffering and
+sample rate are controlled by the browser; no ASIO, fixed driver buffer, or
+measured round-trip latency is claimed for the web edition. It reports available
+base/output latency estimates and worklet block size, not hardware dropout counts.
+See [Web MIDI](https://developer.mozilla.org/en-US/docs/Web/API/Web_MIDI_API) and
+[AudioWorklet](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet).
+
 ## Play your MPK mini / MIDI keyboard
 
-1. Connect the keyboard by USB and launch `shredini.exe`. With no configured
+1. Connect the keyboard by USB and launch Shredini (`shredini.exe` on Windows). With no configured
    guitar input, a detected MPK mini is selected automatically. Otherwise choose
    **MIDI keyboard** in the main Instrument selector.
-2. Shredini suggests the Windows default stereo output when none is saved. Open
+2. Shredini suggests the system's default stereo output when none is saved. Open
    **Audio & setup** to select a different speaker/headphone output or MIDI port.
    **WASAPI** works with computer audio; a guitar interface is not required.
 3. Choose a sound card, press **Start playing**, and
@@ -166,6 +209,70 @@ uses the same selected devices; it never switches to a different speaker or mic.
 
 ## Build
 
+Packaging scripts require Python 3.11 or newer. Native compilation requires a
+working C/C++ toolchain for your OS in addition to stable Rust.
+
+### Linux
+
+Install stable Rust and development libraries. On Ubuntu/Debian:
+
+```sh
+sudo apt-get install build-essential pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libgl1-mesa-dev
+cargo run --locked
+python3 scripts/package-native.py
+```
+
+The desktop needs OpenGL and ALSA runtime libraries. File dialogs use the desktop's
+XDG portal; install/configure `xdg-desktop-portal` and your desktop's portal backend
+if no picker opens. Use an ALSA endpoint configured for your sound server, or the
+hardware endpoint if available. PipeWire/PulseAudio are accessed through their
+ALSA configuration in this build; their optional native CPAL backends are not enabled.
+The packager produces `dist/Shredini-<version>-linux-<arch>.tar.gz`.
+The locally supplied x64 archive was built on Ubuntu 26.04 and requires glibc
+2.43 or newer. Rebuild from source on an older distribution; the configured
+Ubuntu 24.04 CI job will produce its own package with that runner's baseline.
+
+### macOS
+
+Install stable Rust and Apple's Command Line Tools (`xcode-select --install`), then:
+
+```sh
+cargo run --locked
+python3 scripts/package-native.py
+```
+
+Build on an Intel Mac for x64, or Apple Silicon for arm64. The packager creates a
+`Shredini.app` with its microphone usage description, retained licenses and an
+ad-hoc development signature, then a ZIP. It does not provide Developer ID signing
+or notarization. Open the app bundle for a stable app identity when granting
+microphone permission. In Audio MIDI Setup, select the desired interface settings;
+separate inputs and outputs use the existing adaptive resampler.
+
+### Web
+
+Python 3.11+ and Rust's WebAssembly target are required. Use the wasm-bindgen CLI
+version matching Cargo.lock (currently 0.2.129):
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129 --locked --root target/tools
+python3 scripts/build-web.py
+python3 scripts/serve-web.py
+```
+
+On Windows use `python` instead of `python3`. Open `http://localhost:8080`.
+Serve the built `dist/Shredini-<version>-web` directory on any static HTTPS host
+to distribute it; do not open `index.html` through `file://`. Serve `.wasm` as
+`application/wasm` and `.js` as JavaScript. The local preview server binds only to
+localhost and defaults to port 8080 (`--port 8081` chooses another).
+
+WebAssembly is instantiated once in an AudioWorklet and renders into preallocated
+input/output buffers. Compressed audio decoding runs in a separate Worker. Assets
+are installed before the worklet connects; controls and MIDI use messages.
+Web UI/state checks: `node --test web/tests/*.test.mjs`.
+
+### Windows
+
 For everyday development, install current stable Rust for
 `x86_64-pc-windows-msvc` and Visual Studio C++ Build Tools with a Windows SDK:
 
@@ -280,5 +387,7 @@ This does not claim that third-party drivers or CPAL internals are lock-free;
 CPAL's ASIO backend has its own synchronization.
 
 See [VALIDATION.md](VALIDATION.md) for measured checks and outstanding hardware
-validation. VST hosting, recording, amp/cab models, chorus, hardware control, and
-other operating systems are outside this release.
+validation. VST hosting, recording, amp/cab models, chorus and hardware preset
+control remain outside this release. The workflow in `.github/workflows/platforms.yml`
+builds/tests Windows, Ubuntu, Intel macOS, Apple Silicon macOS and the web archive;
+it runs on push/PR/manual dispatch and has not been dispatched by this local task.

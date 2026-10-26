@@ -1,13 +1,17 @@
 # Validation record
 
-Validation performed on Windows x64 with Rust 1.99.1. This document distinguishes
-software verification from checks that require the TONEX ONE hardware.
+Validation performed on Windows x64 and Ubuntu/WSL x64 with Rust 1.99.1, plus a
+Chromium-based browser for the web build. Native macOS validation is pending.
+This document distinguishes software verification from hardware checks.
 
 ## Automated checks
 
-`cargo test --release --locked`: **21 passed, 0 failed**, completed in 1.52 s
-on the final build with the statically linked Windows C runtime.
-Formatting and Clippy (`--all-targets --all-features -- -D warnings`) passed.
+`cargo test --release --locked`: **23 passed, 0 failed** (16 shared-core tests and
+7 desktop tests) on both Windows and Ubuntu/WSL. The Windows run completed in
+1.58 s; the Linux run in 1.82 s. Windows uses the statically linked C runtime.
+Formatting and native Clippy passed, including Windows ASIO/all-features. The
+WebAssembly library also passed Clippy with warnings denied. Four JavaScript
+tests pass for settings/preset recovery and worklet UTF-8 initialization.
 The filesystem's incremental-cache hard-link warning does not affect compilation.
 
 - DSP: exact silence, finite/bounded output at 44.1/48/96 kHz, extreme controls,
@@ -41,6 +45,43 @@ Observed drift simulations (90 seconds each, 512-frame queue target):
 | 48 → 44.1 kHz | −400 ppm | 354–559 frames | +416.1 ppm | 0 |
 
 ## Desktop checks
+
+### Cross-platform studio (Shredini 0.4.0)
+
+- Windows: compiled the native application and retained its WASAPI/optional ASIO
+  paths. Linux: compiled and packaged a native ELF executable under Ubuntu/WSL,
+  with ALSA device management and MIDI, X11/Wayland GUI features and XDG dialogs.
+  The full Linux regression suite passes. The local Ubuntu 26.04 archive requires
+  glibc 2.43 (confirmed from its ELF imports). The Windows executable imports only
+  system DLLs; the shared-core refactor adds no runtime Rust DLL dependency.
+  Linux physical instrument I/O,
+  disconnect behavior and graphical desktop performance are not yet validated.
+- macOS: platform-specific host selection, CoreAudio/CoreMIDI compilation paths,
+  app-bundle packaging with microphone usage text, development signing and CI
+  jobs for Intel/Apple Silicon are present. No Mac was available for a native
+  build, UI, permission or hardware check. No notarized Mac release is claimed.
+  The CI workflow is saved but has not been remotely dispatched in this task.
+- Web: built a wasm32-unknown-unknown library and static distribution. Shared
+  worklet-adapter tests cover all sampled sounds, sample/backing playback,
+  variable frame counts, bounded output, malformed files and zero Rust render
+  allocations after initialization, including live control changes.
+- Browser UI: observed LIVE playback at 48 kHz with 128-frame AudioWorklet
+  blocks. A piano audition and an imported user sample produced meter activity.
+  The browser reported 10 ms base and 32 ms output latency; these are browser
+  estimates, not measured round-trip latency or confirmed user listening.
+- Imported a generated five-second stereo WAV through the browser picker;
+  verified backing playback, repeated looping, reuse as a keyboard sample,
+  root-note change to C3 and held-loop setting. Imported a synthetic FLAC sample
+  and verified its PCM/waveform and settings restored from IndexedDB/localStorage
+  after reload, with audio stopped. A decoder-request ID collision found during
+  this test was fixed by assigning independent file UUIDs.
+- Browser layout was inspected in wide and narrow windows. A UTF-8 fallback was
+  required for AudioWorkletGlobalScope and has a regression test. The final
+  worklet polls status outside its process callback; the render loop reuses its
+  input/output views and does not build status-message objects.
+- Hardware Web MIDI permissions, browser guitar capture, explicit output-device
+  switching, custom-SF2 imports, Safari/Firefox, browser device loss and a long
+  playback soak remain unverified. These are not replaced by the software tests.
 
 ### Windows development build fix (October 25, 2026)
 

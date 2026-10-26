@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#10151c" />
+    <title>Shredini · Instrument studio</title>
+    <link rel="stylesheet" href="studio.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <a class="brand" href="#studio"
+        ><span class="brand-mark" aria-hidden="true"
+          ><i></i><i></i><i></i><i></i></span
+        >Shredini</a
+      >
+      <p class="eyebrow brand-sub">INSTRUMENT STUDIO</p>
+      <nav aria-label="Workspace">
+        <p class="eyebrow">YOUR WORKSPACE</p>
+        <button data-page="studio" class="nav active">Studio</button
+        ><button data-page="sounds" class="nav">Sound library</button
+        ><button data-page="files" class="nav">Your audio</button
+        ><button data-page="pinned" class="nav">Pinned sounds</button>
+      </nav>
+      <div class="import-group">
+        <p class="eyebrow">ADD TO YOUR STUDIO</p>
+        <button data-import="backing">Import backing track</button
+        ><button data-import="sample">Import keyboard sample</button
+        ><button data-import="font">Load SoundFont bank</button>
+        <p class="muted small">Or drop an audio file into your studio.</p>
+      </div>
+      <div class="bank">
+        <p class="eyebrow">SOUND BANK</p>
+        <p id="bankName">GeneralUser GS · factory bank</p>
+        <p class="small muted">Sampled instruments by S. Christian Collins</p>
+        <button id="factoryBank" class="text-button" hidden>
+          Restore factory bank
+        </button>
+      </div>
+      <button id="setupOpen">Audio & MIDI setup</button>
+      <p class="small muted web-label">WEB EDITION · LOCAL AUDIO</p>
+    </aside>
+    <main>
+      <header class="page-header">
+        <div>
+          <h1 id="pageTitle">Your studio</h1>
+          <p class="muted">Plug in. Find a sound. Make something yours.</p>
+        </div>
+        <div class="source-control">
+          <select id="source" aria-label="Instrument source">
+            <option value="keys">MIDI keyboard</option>
+            <option value="guitar">Guitar / audio</option>
+            <option value="both">Guitar + MIDI</option>
+            <option value="files">Audio files</option></select
+          ><span id="status" class="status">STANDBY</span>
+        </div>
+      </header>
+      <div id="notice" role="status" hidden>
+        <span></span><button aria-label="Dismiss message">×</button>
+      </div>
+      <section class="hero card">
+        <div class="hero-copy">
+          <p id="instrumentFamily" class="eyebrow accent">KEYS</p>
+          <h2 id="instrumentName">Studio Grand</h2>
+          <p id="instrumentDescription" class="muted">
+            A sampled grand piano. Clear, expressive, and ready to play.
+          </p>
+          <div class="actions">
+            <button class="primary" id="startHero">Start playing</button
+            ><button id="audition">Audition</button
+            ><button id="connectKeyboard" class="text-button">
+              Connect MIDI
+            </button>
+          </div>
+        </div>
+        <div class="hero-visual">
+          <div
+            id="keyboard"
+            class="keyboard"
+            aria-label="Playable piano keyboard"
+          ></div>
+          <p id="midiLabel" class="accent small">
+            Play here, or connect your MIDI keyboard.
+          </p>
+          <div class="activity">
+            <span id="activity" class="small muted"
+              >0 active notes · 0 MIDI events</span
+            ><label class="small muted"
+              >INPUT <meter id="inputMeter" min="0" max="1" value="0"></meter
+            ></label>
+          </div>
+        </div>
+      </section>
+      <section id="sampler" class="card" hidden>
+        <div class="section-head">
+          <h3>Keyboard sampler</h3>
+          <button data-import="sample">Choose audio…</button>
+        </div>
+        <p id="sampleName" class="accent">
+          Import a recording to make it your own.
+        </p>
+        <canvas
+          id="sampleWave"
+          height="58"
+          aria-label="Sample waveform"
+        ></canvas>
+        <div class="sampler-controls">
+          <label
+            >Root note
+            <input id="root" type="number" min="0" max="127" value="60" /><span
+              id="rootLabel"
+              class="muted"
+              >C4</span
+            ></label
+          ><label
+            >Start
+            <input
+              id="sampleStart"
+              type="range"
+              min="0"
+              max="0.99"
+              step="0.001"
+              value="0" /></label
+          ><label
+            >End
+            <input
+              id="sampleEnd"
+              type="range"
+              min="0.001"
+              max="1"
+              step="0.001"
+              value="1" /></label
+          ><label
+            ><input id="sampleLoop" type="checkbox" /> Loop while held</label
+          >
+        </div>
+        <p class="muted small">
+          Choose the recording’s original note. Higher keys play it faster;
+          lower keys play it slower.
+        </p>
+      </section>
+      <section id="library" hidden>
+        <div class="section-head">
+          <h3>Find your sound</h3>
+          <input
+            type="search"
+            id="search"
+            placeholder="Search instruments…"
+            aria-label="Search instruments"
+          />
+        </div>
+        <div
+          id="families"
+          class="families"
+          role="group"
+          aria-label="Instrument family"
+        ></div>
+        <div id="soundGrid" class="sound-grid"></div>
+      </section>
+      <section id="files" hidden>
+        <h3>A home for your own sounds</h3>
+        <div class="file-imports">
+          <div class="card">
+            <h3>Backing tracks</h3>
+            <p class="muted">Songs and loops to play along with.</p>
+            <button data-import="backing">Import audio…</button>
+          </div>
+          <div class="card">
+            <h3>Keyboard samples</h3>
+            <p class="muted">Turn a recording into a playable instrument.</p>
+            <button data-import="sample">Import audio…</button>
+          </div>
+        </div>
+        <div id="fileList"></div>
+        <p class="muted small">
+          Audio stays in this browser’s local storage. Nothing is uploaded.
+          Large files may exceed browser storage limits.
+        </p>
+      </section>
+      <section class="card" id="effects">
+        <div class="section-head">
+          <h3>Tone & space</h3>
+          <div class="actions">
+            <select id="presets" aria-label="Tone preset"></select
+            ><button id="presetSave">Save tone…</button
+            ><button id="presetManage" class="text-button">Manage</button>
+          </div>
+        </div>
+        <div class="effects-grid">
+          <label class="effect"
+            >Tone<output id="toneValue">65%</output
+            ><input id="tone" type="range" min="0" max="1" step="0.01" /><span
+              class="muted small"
+              >Warm → bright</span
+            ></label
+          >
+          <label class="effect"
+            >Warmth<output id="warmthValue">12%</output
+            ><input id="warmth" type="range" min="0" max="1" step="0.01" /><span
+              class="muted small"
+              >Soft saturation</span
+            ></label
+          >
+          <label class="effect"
+            >Reverb<output id="reverbValue">24%</output
+            ><input id="reverb" type="range" min="0" max="1" step="0.01" /><span
+              class="muted small"
+              >Room & depth</span
+            ></label
+          >
+          <label class="effect"
+            >Delay<output id="delayValue">15%</output
+            ><input id="delay" type="range" min="0" max="1" step="0.01" /><span
+              class="muted small"
+              >A little echo</span
+            ></label
+          >
+        </div>
+        <div class="effects-footer">
+          <label
+            ><input id="compression" type="checkbox" /> Smooth
+            compression</label
+          ><label><input id="bypass" type="checkbox" /> Bypass effects</label
+          ><button id="panic" class="text-button">All notes off</button
+          ><span id="edited" class="small gold" hidden>Tone edited</span>
+        </div>
+      </section>
+      <section class="card" id="backing">
+        <div class="section-head">
+          <h3>Play along</h3>
+          <button data-import="backing">Import track</button>
+        </div>
+        <p id="trackName" class="accent">
+          Bring a song, a loop, or a recording.
+        </p>
+        <canvas
+          id="trackWave"
+          height="62"
+          aria-label="Backing track waveform"
+        ></canvas
+        ><label class="seek-label"
+          ><span class="sr-only">Track position</span
+          ><input
+            id="seek"
+            type="range"
+            min="0"
+            max="1"
+            step="0.001"
+            value="0"
+            disabled
+        /></label>
+        <div class="track-controls">
+          <button id="playTrack" disabled>Play track</button
+          ><button id="rewind" disabled>Rewind</button
+          ><label><input id="trackLoop" type="checkbox" /> Loop</label
+          ><span id="trackTime" class="small muted">0:00 / 0:00</span
+          ><label class="small muted"
+            >Track level
+            <input id="trackGain" type="range" min="0" max="1" step="0.01"
+          /></label>
+        </div>
+        <p class="muted small">
+          WAV · MP3 · FLAC · OGG · up to 28.8 million frames per file
+        </p>
+      </section>
+    </main>
+    <footer class="transport">
+      <button id="start" class="primary">Start audio</button>
+      <div class="output-summary">
+        <strong id="outputName">Browser audio output</strong
+        ><span id="audioInfo" class="small muted">Ready when you are</span>
+      </div>
+      <label class="small muted"
+        ><input id="click" type="checkbox" /> Click</label
+      ><label class="small muted"
+        ><input id="bpm" type="number" min="30" max="240" value="100" />
+        BPM</label
+      ><label class="meter-label small muted"
+        >OUT <meter id="outputMeter" min="0" max="1" value="0"></meter
+        ><span id="peakWarning" class="gold" hidden>PEAK</span></label
+      ><label class="master-label small muted"
+        >MASTER
+        <input id="master" type="range" min="-60" max="0" step="1" /><output
+          id="masterValue"
+          >−12 dB</output
+        ></label
+      >
+    </footer>
+    <dialog id="setup">
+      <div class="section-head">
+        <h2>Audio & MIDI setup</h2>
+        <button data-close="setup" aria-label="Close setup">×</button>
+      </div>
+      <p class="muted">
+        Browser audio uses Web Audio. Your operating system and browser control
+        the sample rate and buffering.
+      </p>
+      <label>Guitar input<select id="inputDevice"></select></label
+      ><label
+        >Guitar channel<input
+          id="channel"
+          type="number"
+          min="1"
+          max="64"
+          value="1"
+      /></label>
+      <p class="small muted">
+        Enable an instrument source and press Start to grant microphone access.
+        Use headphones and disable interface direct monitoring for processed
+        guitar.
+      </p>
+      <label>Stereo output<select id="outputDevice"></select></label>
+      <p id="outputHelp" class="small muted"></p>
+      <label>MIDI keyboard<select id="midiDevice"></select></label>
+      <div class="actions">
+        <button id="midiConnect">Connect MIDI</button
+        ><button id="refreshDevices">Refresh devices</button>
+      </div>
+      <label
+        >Input trim<input
+          id="trim"
+          type="range"
+          min="-24"
+          max="24"
+          step="1"
+        /><output id="trimValue">0 dB</output></label
+      >
+      <h3>Diagnostics</h3>
+      <p id="diagnostics" class="muted small">
+        Start audio to see the accepted configuration.
+      </p>
+      <p id="compatibility" class="muted small"></p>
+      <p class="muted small">
+        Audio starts only after you press Start. If a selected device
+        disconnects, playback stops. Browser-default output follows your
+        operating system’s default device.
+      </p>
+    </dialog>
+    <dialog id="presetDialog">
+      <div class="section-head">
+        <h2 id="presetDialogTitle">Save your tone</h2>
+        <button data-close="presetDialog" aria-label="Close preset editor">
+          ×
+        </button>
+      </div>
+      <label
+        >Preset name<input id="presetName" maxlength="60" autocomplete="off"
+      /></label>
+      <p id="presetError" class="gold small"></p>
+      <div class="actions">
+        <button class="primary" id="presetConfirm">Save preset</button
+        ><button id="presetUpdate">Update tone</button
+        ><button id="presetDelete">Delete preset</button>
+      </div>
+    </dialog>
+    <dialog id="dropDialog">
+      <h2>Make this file part of your studio</h2>
+      <p id="dropName"></p>
+      <div class="actions">
+        <button id="dropBacking">Backing track</button
+        ><button id="dropSample">Keyboard sample</button
+        ><button data-close="dropDialog">Cancel</button>
+      </div>
+    </dialog>
+    <input
+      id="audioFile"
+      type="file"
+      accept=".wav,.mp3,.flac,.ogg"
+      hidden
+    /><input id="fontFile" type="file" accept=".sf2" hidden />
+    <script type="module" src="studio.js"></script>
+  </body>
+</html>

@@ -10,6 +10,12 @@ Symphonia (MPL-2.0) decodes audio files; rfd (MIT) provides native file dialogs.
 The original oscillator/envelope and single-sample instrument code is part of
 Shredini.
 
+The browser edition uses wasm-bindgen (MIT OR Apache-2.0) to expose the same
+Rust sound engine to its AudioWorklet and decoder Workers. Its original browser
+interface and UTF-8 worklet fallback are covered by the project's MIT license.
+Native Linux and macOS distributions use the corresponding CPAL/midir backends;
+the optional Steinberg SDK is included only in Windows ASIO builds.
+
 The embedded GeneralUser GS v2.0.3 SoundFont is by S. Christian Collins and its
 contributors, under its own License v2.0. The complete unmodified license is in
 GeneralUser-GS-LICENSE.txt in portable distributions and assets/ in the source.

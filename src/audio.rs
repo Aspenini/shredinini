@@ -241,15 +241,27 @@ impl Drop for Engine {
 
 fn host(backend: Backend) -> Result<cpal::Host> {
     match backend {
-        Backend::Wasapi => Ok(cpal::host_from_id(cpal::HostId::Wasapi)?),
+        Backend::Platform => Ok(cpal::default_host()),
+        Backend::Wasapi => {
+            #[cfg(target_os = "windows")]
+            {
+                Ok(cpal::host_from_id(cpal::HostId::Wasapi)?)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                bail!("WASAPI is Windows-only. Choose the system audio backend in setup.")
+            }
+        }
         Backend::Asio => {
-            #[cfg(feature = "asio")]
+            #[cfg(all(feature = "asio", target_os = "windows"))]
             {
                 Ok(cpal::host_from_id(cpal::HostId::Asio)?)
             }
-            #[cfg(not(feature = "asio"))]
+            #[cfg(not(all(feature = "asio", target_os = "windows")))]
             {
-                bail!("This build has no ASIO support. Select WASAPI or use the ASIO release.")
+                bail!(
+                    "ASIO requires a Windows ASIO build. Choose the system audio backend in setup."
+                )
             }
         }
     }
@@ -257,7 +269,7 @@ fn host(backend: Backend) -> Result<cpal::Host> {
 pub fn enumerate_devices() -> (Vec<DeviceInfo>, String) {
     let mut result = Vec::new();
     let mut notes = Vec::new();
-    for backend in [Backend::Asio, Backend::Wasapi] {
+    for &backend in Backend::available() {
         match host(backend).and_then(|h| {
             Ok((
                 h.default_output_device().and_then(|d| d.id().ok()),
@@ -292,7 +304,9 @@ pub fn enumerate_devices() -> (Vec<DeviceInfo>, String) {
             Err(e) => notes.push(format!("{}: {e}", backend.label())),
         }
     }
-    if !result.iter().any(|d| d.backend == Backend::Asio) {
+    if cfg!(all(target_os = "windows", feature = "asio"))
+        && !result.iter().any(|d| d.backend == Backend::Asio)
+    {
         notes.push(
             "No ASIO device found. Use WASAPI for a USB guitar cable or computer audio, or install your interface manufacturer's ASIO driver if available.".into(),
         );
@@ -507,7 +521,7 @@ fn prepare_pair(
     context: &PlaybackContext,
 ) -> Result<PreparedPair> {
     let (producer, consumer) = HeapRb::<f32>::new(RING_CAPACITY).split();
-    let resampling = config.backend == Backend::Wasapi;
+    let resampling = config.backend != Backend::Asio;
     let requested = match ic.buffer_size {
         cpal::BufferSize::Fixed(n) => n as usize,
         _ => 256,
